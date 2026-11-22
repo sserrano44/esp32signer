@@ -1,0 +1,28 @@
+# Copy to config.yaml (git-ignored) and adjust. Relative paths are relative to this file.
+signer:
+  url: https://signer.local
+  ca: ../../certs/ca/ca.pem           # CA that signed the device's TLS cert
+  token_file: ../../certs/api_token   # or export SIGNER_TOKEN
+
+rpc:                                  # public endpoints work for testing; use your own for production
+  base: https://mainnet.base.org
+  celo: https://forno.celo.org
+
+strategy:
+  poll_seconds: 15
+  min_spread_bps: 50        # don't bother quoting below this (pool fees alone: 5 + 30 bps)
+  min_profit_usdc: 1.0      # after both pool fees, price impact and gas
+  ladder_usdc: [50, 100, 250, 500, 1000, 2000]
+  max_trade_usdc: 2000
+  slippage_bps: 30          # amountOutMinimum on each leg
+  gas_cost_usdc: {base: 0.02, celo: 0.05}
+
+rebalance:
+  enabled: true
+  wars_min: 300000          # bridge wARS (Ripio) to a chain below this
+  wars_min_bridge: 100000
+  usdc_min: 200             # USDC Celo -> Base via LI.FI when Base drops below this
+  usdc_min_transfer: 200
+  lifi_max_fee_bps: 60
+
+state_file: state.json      # in-flight bridge transfers

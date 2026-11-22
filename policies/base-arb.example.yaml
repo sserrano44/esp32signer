@@ -1,0 +1,86 @@
+# Example policy: arbitrage bot trading a USDC/wARS Uniswap v4 pool on Base.
+#
+# !! Replace every address marked REPLACE and VERIFY all others against
+# !! official sources before use. Then validate with real bot calldata:
+# !!   esp32signer test-policy policies/base-arb.example.yaml my-bot-txs.json --self-address 0x...
+#
+# Calldata patterns are matched against the lowercase hex calldata (no 0x)
+# and must match it ENTIRELY. Whitespace and '#' comments inside patterns are
+# stripped by the compiler, so you can write one ABI word per line.
+version: 1
+name: base-wars-usdc-arb
+chain_ids: [8453]                         # Base mainnet only
+
+limits:
+  max_gas: 1500000
+  max_fee_per_gas_gwei: 2                 # Base fees are tiny; cap gas-burn attacks
+  max_priority_fee_gwei: 0.5
+  rate_per_minute: 30
+
+address_book:
+  usdc:     "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"   # USDC on Base
+  wars:     "0x0000000000000000000000000000000000000001"   # REPLACE: wARS token on Base
+  permit2:  "0x000000000022D473030F116dDEE9F6B43aC78BA3"   # Uniswap Permit2 (same on all chains)
+  router:   "0x6fF5693b99212Da76ad316178A184AB56D299b43"   # VERIFY: Uniswap v4 UniversalRouter on Base
+  hooks:    "0x0000000000000000000000000000000000000000"   # pool hooks (zero = no hooks)
+  treasury: "0x0000000000000000000000000000000000000002"   # REPLACE: your cold/treasury address
+
+native_transfers:
+  # Sweep ETH (gas money) back to treasury only.
+  - to: "{{treasury}}"
+    max_value_eth: "0.5"
+    label: eth-to-treasury
+
+contracts:
+  - address: "{{usdc}}"
+    label: usdc
+    rules:
+      - name: approve-permit2
+        calldata: "^{{sel:approve(address,uint256)}}{{addr:permit2}}{{uint}}$"
+      - name: transfer-to-treasury
+        calldata: "^{{sel:transfer(address,uint256)}}{{addr:treasury}}{{uint}}$"
+
+  - address: "{{wars}}"
+    label: wars
+    rules:
+      - name: approve-permit2
+        calldata: "^{{sel:approve(address,uint256)}}{{addr:permit2}}{{uint}}$"
+      - name: transfer-to-treasury
+        calldata: "^{{sel:transfer(address,uint256)}}{{addr:treasury}}{{uint}}$"
+
+  - address: "{{permit2}}"
+    label: permit2
+    rules:
+      # Permit2.approve(token, spender, amount, expiration): only the router as spender.
+      - name: approve-router
+        calldata: "^{{sel:approve(address,address,uint160,uint48)}}({{addr:usdc}}|{{addr:wars}}){{addr:router}}{{uint}}{{uint}}$"
+
+  - address: "{{router}}"
+    label: universal-router
+    rules:
+      # UniversalRouter.execute(bytes commands, bytes[] inputs, uint256 deadline)
+      # with exactly one command V4_SWAP (0x10) whose actions are exactly
+      #   SWAP_EXACT_IN_SINGLE (0x06), SETTLE_ALL (0x0c), TAKE_ALL (0x0f).
+      # SETTLE_ALL pays from msg.sender and TAKE_ALL sends output to msg.sender
+      # (this signer), so no recipient parameter exists that could redirect funds.
+      # The USDC/wARS pool key (currency0 < currency1 by address!) must appear.
+      - name: v4-swap-usdc-wars
+        calldata: |
+          ^{{sel:execute(bytes,bytes[],uint256)}}
+          0000000000000000000000000000000000000000000000000000000000000060  # offset commands
+          00000000000000000000000000000000000000000000000000000000000000a0  # offset inputs
+          {{uint}}                                                          # deadline
+          0000000000000000000000000000000000000000000000000000000000000001  # commands.length
+          1000000000000000000000000000000000000000000000000000000000000000  # V4_SWAP
+          0000000000000000000000000000000000000000000000000000000000000001  # inputs.length
+          0000000000000000000000000000000000000000000000000000000000000020  # inputs[0] offset
+          {{uint}}                                                          # inputs[0] length
+          0000000000000000000000000000000000000000000000000000000000000040  # offset actions
+          0000000000000000000000000000000000000000000000000000000000000080  # offset params
+          0000000000000000000000000000000000000000000000000000000000000003  # actions.length
+          060c0f0000000000000000000000000000000000000000000000000000000000  # actions
+          ([0-9a-f]{64})*                                                   # params head...
+          {{addr:wars}}{{addr:usdc}}                                        # REPLACE ORDER: currency0, currency1
+          {{uint}}{{uint}}                                                  # fee, tickSpacing
+          {{addr:hooks}}                                                    # hooks
+          ([0-9a-f]{64})*$                                                  # rest of params

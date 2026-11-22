@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esp32signer"
+version = "0.1.0"
+description = "Host tooling for the ESP32-S3 policy-enforcing Ethereum signer"
+requires-python = ">=3.10"
+dependencies = [
+    "pyserial>=3.5",
+    "pyyaml>=6",
+    "cryptography>=42",
+    "requests>=2.31",
+    "eth-utils>=4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "eth-account>=0.13"]
+bot = ["web3>=7", "eth-abi>=5", "eth-account>=0.13", "truststore>=0.10"]
+
+[project.scripts]
+esp32signer = "esp32signer.cli:main"
+
+[tool.setuptools]
+packages = ["esp32signer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["hardware: needs a provisioned device (set SIGNER_URL, SIGNER_TOKEN, SIGNER_CA)"]

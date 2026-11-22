@@ -1,0 +1,34 @@
+# Hardened release configuration. Layer on top of sdkconfig.defaults:
+#   idf.py -B build-release -D SDKCONFIG=build-release/sdkconfig \
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.release" build
+# READ docs/HARDENING.md FIRST. Flashing this burns eFuses irreversibly.
+#
+# Consequence of release-mode flash encryption with an on-device key: the
+# firmware can no longer be updated over USB (there is no OTA). See
+# docs/HARDENING.md for the host-generated-key alternative.
+
+# ---- Secure Boot v2 (RSA-3072). Signing key is kept OFFLINE. -------------
+CONFIG_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_V2_ENABLED=y
+CONFIG_SECURE_BOOT_V2_RSA_ENABLED=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+CONFIG_SECURE_BOOT_SIGNING_KEY="../keys/secure_boot_signing_key.pem"
+CONFIG_SECURE_BOOT_ENABLE_AGGRESSIVE_KEY_REVOKE=n
+
+# ---- Flash encryption (release mode: no plaintext reflash) ---------------
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE=y
+
+# ---- ROM download mode: "secure" (no flash/RAM/eFuse reads; flash writes
+#      still possible but unsigned/unencrypted images will not boot) ---
+CONFIG_SECURE_ENABLE_SECURE_ROM_DL_MODE=y
+
+# ---- Encrypted NVS, keys derived from an eFuse HMAC key ------------------
+CONFIG_NVS_ENCRYPTION=y
+CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC=y
+CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=1
+
+# ---- Disable debug interfaces --------------------------------------------
+CONFIG_SECURE_BOOT_ALLOW_JTAG=n
+CONFIG_ESP_SYSTEM_PANIC_SILENT_REBOOT=y
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y

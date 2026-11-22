@@ -1,0 +1,31 @@
+menu "ESP32 Signer"
+
+    config SIGNER_BUTTON_GPIO
+        int "Provisioning button GPIO (BOOT on the Super Mini)"
+        default 0
+
+    config SIGNER_LED_GPIO
+        int "WS2812 status LED GPIO"
+        default 48
+
+    config SIGNER_BOOT_WINDOW_MS
+        int "Window after boot during which a BOOT press enters provision mode (ms)"
+        default 3000
+
+    config SIGNER_LONG_PRESS_MS
+        int "Long-press duration at runtime to reboot into provision mode (ms)"
+        default 5000
+
+    config SIGNER_PROVISION_TIMEOUT_S
+        int "Provision mode inactivity timeout (s)"
+        default 600
+
+    config SIGNER_HTTPS_PORT
+        int "HTTPS port"
+        default 443
+
+    config SIGNER_MAX_BODY
+        int "Maximum JSON-RPC request body (bytes)"
+        default 65536
+
+endmenu

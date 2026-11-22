@@ -1,0 +1,31 @@
+# ---- Target / flash -------------------------------------------------------
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x10000
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# ---- Console over native USB (Serial/JTAG) --------------------------------
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# ---- Tasks ----------------------------------------------------------------
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# ---- HTTPS server ---------------------------------------------------------
+CONFIG_ESP_HTTPS_SERVER_ENABLE=y
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=64
+
+# ---- mbedTLS: keep RAM usage low, prefer ECDSA P-256 ----------------------
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+CONFIG_MBEDTLS_TLS_SERVER_ONLY=y
+CONFIG_MBEDTLS_SSL_PROTO_TLS1_2=y
+
+# ---- WiFi: low latency ----------------------------------------------------
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=n
+
+# ---- Logging --------------------------------------------------------------
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

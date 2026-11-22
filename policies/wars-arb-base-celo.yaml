@@ -1,0 +1,225 @@
+# Policy for examples/wars-arb: wARS/USDC arbitrage between the Uniswap v4
+# pools on Base and Celo, rebalanced with the Ripio bridge (wARS) and LI.FI
+# (USDC, Celo -> Base only).
+#
+# Every address below was checked on-chain (2026-11): pool keys via
+# PositionManager.poolKeys, bridge routes via BridgeDeposit.routeConfigs.
+# Re-verify before funding, and test with real bot transactions:
+#   esp32signer test-policy policies/wars-arb-base-celo.yaml txs.json --self-address 0x...
+#
+# What a compromised bot can still do while this policy is loaded:
+#   * swap at a bad price in the two pinned pools (amountOutMinimum is not
+#     checked on the device), e.g. into a pool it has manipulated;
+#   * burn gas up to the caps below x rate_per_minute;
+#   * bridge wARS / USDC between the signer's own addresses on Base and Celo.
+# It cannot send tokens or native coin to any address other than the signer.
+version: 1
+name: wars-arb-base-celo
+chain_ids: [8453, 42220]
+
+limits:                                   # defaults = Base
+  max_gas: 1500000
+  max_fee_per_gas_gwei: 0.5               # Base base fee is ~0.005 gwei
+  max_priority_fee_gwei: 0.05
+  rate_per_minute: 30
+
+chain_limits:
+  42220:                                  # Celo base fee floor is ~200 gwei
+    max_gas: 1500000
+    max_fee_per_gas_gwei: 500
+    max_priority_fee_gwei: 5
+
+address_book:
+  wars:          "0x0DC4F92879B7670e5f4e4e6e3c801D229129D90D"   # same on Base and Celo
+  usdc_base:     "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+  usdc_celo:     "0xcebA9300f2b948710d2653dD7B07f33A8B32118C"
+  permit2:       "0x000000000022D473030F116dDEE9F6B43aC78BA3"   # same on both
+  router_base:   "0x6fF5693b99212Da76ad316178A184AB56D299b43"   # Uniswap v4 UniversalRouter
+  router_celo:   "0xcb695bc5d3aa22cad1e6df07801b061a05a0233a"
+  ripio_bridge:  "0x465e642387d3d73a57CDc1368fFA53A800bA5D47"   # BridgeDeposit, same on both
+  lifi:          "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"   # LI.FI diamond
+  lifi_fees_celo: "0xde2b920506ee931a6a2abdf566526220214fbbae"  # LI.FI FeeCollector on Celo
+  lifi_fee_wallet: "0xc06ebbefd94032b85424d51906e2a335efae264b" # LI.FI fee recipient
+  no_hooks:      "0x0000000000000000000000000000000000000000"
+
+contracts:
+  # ---------------------------------------------------------------- wARS ---
+  # Same address on both chains, so one entry. Approvals only to Permit2
+  # (for swaps) and to the Ripio bridge (which burns from the signer).
+  - address: "{{wars}}"
+    label: wars
+    rules:
+      - name: approve-permit2
+        calldata: "^{{sel:approve(address,uint256)}}{{addr:permit2}}{{uint}}$"
+      - name: approve-ripio-bridge
+        calldata: "^{{sel:approve(address,uint256)}}{{addr:ripio_bridge}}{{uint}}$"
+
+  # --------------------------------------------------------------- USDC ---
+  - address: "{{usdc_base}}"
+    label: usdc-base
+    chains: [8453]
+    rules:
+      - name: approve-permit2
+        calldata: "^{{sel:approve(address,uint256)}}{{addr:permit2}}{{uint}}$"
+
+  - address: "{{usdc_celo}}"
+    label: usdc-celo
+    chains: [42220]
+    rules:
+      - name: approve-permit2
+        calldata: "^{{sel:approve(address,uint256)}}{{addr:permit2}}{{uint}}$"
+      - name: approve-lifi
+        calldata: "^{{sel:approve(address,uint256)}}{{addr:lifi}}{{uint}}$"
+
+  # ------------------------------------------------------------- Permit2 ---
+  # Permit2.approve(token, spender, amount, expiration): spender must be that
+  # chain's UniversalRouter, token wARS or that chain's USDC.
+  - address: "{{permit2}}"
+    label: permit2-base
+    chains: [8453]
+    rules:
+      - name: approve-router
+        calldata: "^{{sel:approve(address,address,uint160,uint48)}}({{addr:wars}}|{{addr:usdc_base}}){{addr:router_base}}{{uint}}{{uint}}$"
+
+  - address: "{{permit2}}"
+    label: permit2-celo
+    chains: [42220]
+    rules:
+      - name: approve-router
+        calldata: "^{{sel:approve(address,address,uint160,uint48)}}({{addr:wars}}|{{addr:usdc_celo}}){{addr:router_celo}}{{uint}}{{uint}}$"
+
+  # --------------------------------------------------------- Ripio bridge ---
+  # depositForBridge(token, amount, destChainId, destRecipient, clientDepositId)
+  # Only wARS, only to the other chain, only to this signer.
+  - address: "{{ripio_bridge}}"
+    label: ripio-bridge-base
+    chains: [8453]
+    rules:
+      - name: wars-to-celo-self
+        calldata: "^{{sel:depositForBridge(address,uint256,uint256,address,bytes32)}}{{addr:wars}}{{uint}}{{u256:42220}}{{addr:self}}{{uint}}$"
+
+  - address: "{{ripio_bridge}}"
+    label: ripio-bridge-celo
+    chains: [42220]
+    rules:
+      - name: wars-to-base-self
+        calldata: "^{{sel:depositForBridge(address,uint256,uint256,address,bytes32)}}{{addr:wars}}{{uint}}{{u256:8453}}{{addr:self}}{{uint}}$"
+
+  # ------------------------------------------------------ Uniswap v4 swaps ---
+  # UniversalRouter.execute(bytes commands, bytes[] inputs, uint256 deadline)
+  # with exactly one V4_SWAP command whose actions are exactly
+  #   SWAP_EXACT_IN_SINGLE (0x06), SETTLE_ALL (0x0c), TAKE_ALL (0x0f).
+  # SETTLE_ALL pays from msg.sender and TAKE_ALL pays out to msg.sender (this
+  # signer), so there is no recipient field to redirect. Every ABI word is
+  # pinned except deadline and amounts; the pool key is one of the chain's
+  # wARS/USDC pools (currency0 = wARS, no hooks). Base has two: 0.05%/5 and 0.3%/60. Both directions allowed:
+  #   zeroForOne=1: wARS -> USDC (settle wARS, take USDC)
+  #   zeroForOne=0: USDC -> wARS (settle USDC, take wARS)
+  - address: "{{router_base}}"
+    label: router-base
+    chains: [8453]
+    rules:
+      - name: v4-swap-wars-usdc
+        calldata: |
+          ^{{sel:execute(bytes,bytes[],uint256)}}
+          {{u256:0x60}}{{u256:0xa0}}{{uint}}            # commands, inputs offsets; deadline
+          {{u256:1}}1000000000000000000000000000000000000000000000000000000000000000   # commands = 0x10
+          {{u256:1}}{{u256:0x20}}{{u256:0x340}}         # inputs: 1 element of 0x340 bytes
+          {{u256:0x40}}{{u256:0x80}}                    # actions, params offsets
+          {{u256:3}}060c0f0000000000000000000000000000000000000000000000000000000000
+          {{u256:3}}{{u256:0x60}}{{u256:0x1e0}}{{u256:0x240}}   # params: 3 elements
+          {{u256:0x160}}{{u256:0x20}}                   # params[0]: ExactInputSingleParams
+          {{addr:wars}}{{addr:usdc_base}}
+          (?:{{u256:500}}{{u256:5}}|{{u256:3000}}{{u256:60}})   # the 0.05% or the 0.3% pool
+          {{addr:no_hooks}}
+          (
+            {{u256:1}}{{uint}}{{uint}}{{u256:0x120}}{{u256:0}}
+            {{u256:0x40}}{{addr:wars}}{{uint}}          # SETTLE_ALL wARS, max
+            {{u256:0x40}}{{addr:usdc_base}}{{uint}}     # TAKE_ALL USDC, min
+          |
+            {{u256:0}}{{uint}}{{uint}}{{u256:0x120}}{{u256:0}}
+            {{u256:0x40}}{{addr:usdc_base}}{{uint}}
+            {{u256:0x40}}{{addr:wars}}{{uint}}
+          )$
+
+  - address: "{{router_celo}}"
+    label: router-celo
+    chains: [42220]
+    rules:
+      - name: v4-swap-wars-usdc-0.3
+        calldata: |
+          ^{{sel:execute(bytes,bytes[],uint256)}}
+          {{u256:0x60}}{{u256:0xa0}}{{uint}}
+          {{u256:1}}1000000000000000000000000000000000000000000000000000000000000000
+          {{u256:1}}{{u256:0x20}}{{u256:0x340}}
+          {{u256:0x40}}{{u256:0x80}}
+          {{u256:3}}060c0f0000000000000000000000000000000000000000000000000000000000
+          {{u256:3}}{{u256:0x60}}{{u256:0x1e0}}{{u256:0x240}}
+          {{u256:0x160}}{{u256:0x20}}
+          {{addr:wars}}{{addr:usdc_celo}}{{u256:3000}}{{u256:30}}{{addr:no_hooks}}
+          (
+            {{u256:1}}{{uint}}{{uint}}{{u256:0x120}}{{u256:0}}
+            {{u256:0x40}}{{addr:wars}}{{uint}}
+            {{u256:0x40}}{{addr:usdc_celo}}{{uint}}
+          |
+            {{u256:0}}{{uint}}{{uint}}{{u256:0x120}}{{u256:0}}
+            {{u256:0x40}}{{addr:usdc_celo}}{{uint}}
+            {{u256:0x40}}{{addr:wars}}{{uint}}
+          )$
+
+  # ------------------------------------------------- LI.FI (USDC Celo->Base) ---
+  # Only swapAndStartBridgeTokensViaLayerSwap from Celo to Base. LI.FI does not
+  # offer LayerSwap for Base->Celo, and the alternative (Squid) carries
+  # arbitrary multicalls that cannot be pinned safely, so that direction is
+  # deliberately NOT allowed.
+  #
+  # Pinned: BridgeData (USDC, receiver = self, destination 8453, no destination
+  # call), exactly one SwapData that calls the LI.FI FeeCollector's
+  # forwardERC20Fees(USDC, [(LI.FI fee wallet, amount < 2^28 = ~268 USDC)]),
+  # and LayerSwapData.refundRecipient = self, nonEVMReceiver = 0.
+  #
+  # Trust note: the LayerSwap facet sends funds to the LayerSwap depository,
+  # and the destination is fixed off-chain by LayerSwap's requestId. The
+  # facet only checks a LI.FI backend signature over bridgeData.receiver,
+  # so you are trusting LI.FI's backend and LayerSwap to deliver to that
+  # receiver. Approve LI.FI for the exact amount only, right before the
+  # transfer (the bot does this). Review the facet again before allowing any
+  # other LI.FI function.
+  - address: "{{lifi}}"
+    label: lifi-celo
+    chains: [42220]
+    rules:
+      - name: usdc-to-base-layerswap
+        calldata: |
+          ^{{sel:swapAndStartBridgeTokensViaLayerSwap((bytes32,string,string,address,address,address,uint256,uint256,bool,bool),(address,address,address,address,uint256,bytes,bool)[],(bytes32,address,address,bytes32,bytes,uint256))}}
+          {{u256:0x60}}{{u256:0x220}}{{u256:0x420}}     # bridgeData, swapData, layerSwapData
+          # BridgeData
+          {{uint}}                                      # transactionId
+          {{u256:0x140}}{{u256:0x180}}                  # bridge, integrator string offsets
+          {{uint}}                                      # referrer (event only)
+          {{addr:usdc_celo}}                            # sendingAssetId
+          {{addr:self}}                                 # receiver
+          {{uint}}                                      # minAmount
+          {{u256:8453}}                                 # destinationChainId
+          {{u256:1}}{{u256:0}}                          # hasSourceSwaps, hasDestinationCall
+          {{u256:9}}6c61796572737761700000000000000000000000000000000000000000000000      # "layerswap"
+          {{u256:8}}6c6966692d617069000000000000000000000000000000000000000000000000      # "lifi-api"
+          # SwapData[1]
+          {{u256:1}}{{u256:0x20}}
+          {{addr:lifi_fees_celo}}{{addr:lifi_fees_celo}}  # callTo, approveTo
+          {{addr:usdc_celo}}{{addr:usdc_celo}}          # sending, receiving
+          {{uint}}                                      # fromAmount
+          {{u256:0xe0}}{{u256:1}}                       # callData offset, requiresDeposit
+          {{u256:0xa4}}                                 # callData length
+          {{sel:forwardERC20Fees(address,(address,uint256)[])}}
+          {{addr:usdc_celo}}{{u256:0x40}}{{u256:1}}
+          {{addr:lifi_fee_wallet}}
+          000000000000000000000000000000000000000000000000000000000[0-9a-f]{7}   # fee amount
+          00000000000000000000000000000000000000000000000000000000           # padding
+          # LayerSwapData
+          {{uint}}                                      # requestId
+          {{uint}}                                      # depositoryReceiver (depository whitelist)
+          {{addr:self}}                                 # refundRecipient
+          {{u256:0}}                                    # nonEVMReceiver
+          {{u256:0xc0}}{{uint}}                         # signature offset, deadline
+          {{u256:0x41}}[0-9a-f]{130}0{62}$              # 65-byte backend signature

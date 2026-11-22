@@ -1,0 +1,30 @@
+# Policy used by host/tests/test_device_e2e.py (Base Sepolia).
+# Provision a TEST device with it; never use with real funds.
+version: 1
+name: e2e-test
+chain_ids: [84532]
+
+limits:
+  max_gas: 500000
+  max_fee_per_gas_gwei: 5
+  max_priority_fee_gwei: 1
+  rate_per_minute: 12
+
+address_book:
+  usdc:     "0x036CbD53842c5426634e7929541eC2318f3dCF7e"   # USDC on Base Sepolia
+  permit2:  "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+  treasury: "0x9999999999999999999999999999999999999999"
+
+native_transfers:
+  - to: "{{treasury}}"
+    max_value_eth: "0.01"
+    label: treasury
+
+contracts:
+  - address: "{{usdc}}"
+    label: usdc
+    rules:
+      - name: approve-permit2
+        calldata: "^{{sel:approve(address,uint256)}}{{addr:permit2}}{{uint}}$"
+      - name: transfer-self
+        calldata: "^{{sel:transfer(address,uint256)}}{{addr:self}}{{uint}}$"
