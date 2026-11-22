@@ -19,7 +19,7 @@ limits:
 
 address_book:
   usdc:     "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"   # USDC on Base
-  wars:     "0x0000000000000000000000000000000000000001"   # REPLACE: wARS token on Base
+  wars:     "0x0DC4F92879B7670e5f4e4e6e3c801D229129D90D"   # VERIFY: wARS on Base (Ripio)
   permit2:  "0x000000000022D473030F116dDEE9F6B43aC78BA3"   # Uniswap Permit2 (same on all chains)
   router:   "0x6fF5693b99212Da76ad316178A184AB56D299b43"   # VERIFY: Uniswap v4 UniversalRouter on Base
   hooks:    "0x0000000000000000000000000000000000000000"   # pool hooks (zero = no hooks)
@@ -63,24 +63,35 @@ contracts:
       #   SWAP_EXACT_IN_SINGLE (0x06), SETTLE_ALL (0x0c), TAKE_ALL (0x0f).
       # SETTLE_ALL pays from msg.sender and TAKE_ALL sends output to msg.sender
       # (this signer), so no recipient parameter exists that could redirect funds.
-      # The USDC/wARS pool key (currency0 < currency1 by address!) must appear.
-      - name: v4-swap-usdc-wars
+      #
+      # EVERY ABI word is pinned except the deadline and the amounts: the input
+      # length, every offset, the pool key at its fixed position (currency0 <
+      # currency1 by address, fee, tickSpacing, hooks), the empty hookData and
+      # the SETTLE_ALL/TAKE_ALL currencies. Never use open-ended wildcards such
+      # as ([0-9a-f]{64})* around the pool key: they let calldata swap through
+      # any pool (e.g. one with a malicious hook) as long as the expected words
+      # appear somewhere in trailing junk.
+      #
+      # Pool: wARS/USDC 0.3% (fee 3000, tickSpacing 60), no hooks. Both directions:
+      #   zeroForOne=1: wARS -> USDC (settle wARS, take USDC)
+      #   zeroForOne=0: USDC -> wARS (settle USDC, take wARS)
+      - name: v4-swap-wars-usdc
         calldata: |
           ^{{sel:execute(bytes,bytes[],uint256)}}
-          0000000000000000000000000000000000000000000000000000000000000060  # offset commands
-          00000000000000000000000000000000000000000000000000000000000000a0  # offset inputs
-          {{uint}}                                                          # deadline
-          0000000000000000000000000000000000000000000000000000000000000001  # commands.length
-          1000000000000000000000000000000000000000000000000000000000000000  # V4_SWAP
-          0000000000000000000000000000000000000000000000000000000000000001  # inputs.length
-          0000000000000000000000000000000000000000000000000000000000000020  # inputs[0] offset
-          {{uint}}                                                          # inputs[0] length
-          0000000000000000000000000000000000000000000000000000000000000040  # offset actions
-          0000000000000000000000000000000000000000000000000000000000000080  # offset params
-          0000000000000000000000000000000000000000000000000000000000000003  # actions.length
-          060c0f0000000000000000000000000000000000000000000000000000000000  # actions
-          ([0-9a-f]{64})*                                                   # params head...
-          {{addr:wars}}{{addr:usdc}}                                        # REPLACE ORDER: currency0, currency1
-          {{uint}}{{uint}}                                                  # fee, tickSpacing
-          {{addr:hooks}}                                                    # hooks
-          ([0-9a-f]{64})*$                                                  # rest of params
+          {{u256:0x60}}{{u256:0xa0}}{{uint}}            # commands, inputs offsets; deadline
+          {{u256:1}}1000000000000000000000000000000000000000000000000000000000000000   # commands = 0x10
+          {{u256:1}}{{u256:0x20}}{{u256:0x340}}         # inputs: 1 element of 0x340 bytes
+          {{u256:0x40}}{{u256:0x80}}                    # actions, params offsets
+          {{u256:3}}060c0f0000000000000000000000000000000000000000000000000000000000
+          {{u256:3}}{{u256:0x60}}{{u256:0x1e0}}{{u256:0x240}}   # params: 3 elements
+          {{u256:0x160}}{{u256:0x20}}                   # params[0]: ExactInputSingleParams
+          {{addr:wars}}{{addr:usdc}}{{u256:3000}}{{u256:60}}{{addr:hooks}}   # pool key
+          (
+            {{u256:1}}{{uint}}{{uint}}{{u256:0x120}}{{u256:0}}   # zeroForOne, in, minOut, hookData (empty)
+            {{u256:0x40}}{{addr:wars}}{{uint}}          # SETTLE_ALL wARS, max
+            {{u256:0x40}}{{addr:usdc}}{{uint}}          # TAKE_ALL USDC, min
+          |
+            {{u256:0}}{{uint}}{{uint}}{{u256:0x120}}{{u256:0}}
+            {{u256:0x40}}{{addr:usdc}}{{uint}}
+            {{u256:0x40}}{{addr:wars}}{{uint}}
+          )$

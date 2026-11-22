@@ -100,6 +100,13 @@ def test_v4_swap_rule_matches_real_abi_encoding(arb):
     assert not evaluate(arb, base_tx(to=router, data=v4_swap_calldata(c0, c1, b["hooks"], commands=b"\x10\x04")))[0]
     # TAKE (0x0e) has an arbitrary recipient: must be rejected
     assert not evaluate(arb, base_tx(to=router, data=v4_swap_calldata(c0, c1, b["hooks"], actions=b"\x06\x0c\x0e")))[0]
+    # A swap through another pool (here: attacker hooks) that carries the expected
+    # pool-key words in trailing junk must be rejected: the key is pinned in place.
+    smuggled = v4_swap_calldata(c0, c1, EVIL) + word(c0) + word(c1) + f"{3000:064x}{60:064x}" + word(b["hooks"])
+    assert not evaluate(arb, base_tx(to=router, data=smuggled))[0]
+    # Taking a different currency (only the TAKE_ALL word changed) is rejected.
+    i = good.rindex(c1.lower()[2:])
+    assert not evaluate(arb, base_tx(to=router, data=good[:i] + EVIL.lower()[2:] + good[i + 40:]))[0]
 
 
 def test_native(arb):

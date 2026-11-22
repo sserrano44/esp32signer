@@ -50,9 +50,10 @@ policy already allows.
      that contract.
 2. **Gas burn.** Allowed txs with maximal fees waste funds, up to
    `max_gas × max_fee_per_gas × rate`. Keep the caps realistic for the chain.
-3. **Denial of service.** The host or anyone on the LAN can flood requests,
-   trigger the auth backoff, or unplug the device. It fails closed: nothing
-   gets signed.
+3. **Denial of service.** The host or anyone on the LAN can flood requests
+   or unplug the device. It fails closed: nothing gets signed. Bad tokens are
+   rejected at once (no backoff: the token is 256 bits, and a sleep would
+   stall the single server task for every client); `signer_status` counts them.
 4. **USB access before hardening.** In the development build, anyone with USB
    access can reflash the firmware and read the key out of flash. Power the
    device from a USB charger, not the trading machine, and apply

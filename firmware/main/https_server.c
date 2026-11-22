@@ -14,8 +14,6 @@
 
 static const char *TAG = "https";
 
-#define AUTH_FREE_FAILURES 10
-#define AUTH_MAX_BACKOFF_S 30
 
 static uint32_t s_consecutive_auth_fail;
 
@@ -59,16 +57,12 @@ static esp_err_t send_json(httpd_req_t *req, const char *status, const char *bod
 static esp_err_t rpc_post(httpd_req_t *req)
 {
     if (!authorized(req)) {
+        /* No backoff: the token is 256 bits, so slowing guesses adds nothing,
+         * and sleeping here would stall the single httpd task for every
+         * client. Anyone on the LAN could then freeze the real bot. */
         uint32_t n = ++s_consecutive_auth_fail;
         g_app.n_auth_fail++;
-        if (n > AUTH_FREE_FAILURES) {
-            uint32_t delay = n - AUTH_FREE_FAILURES;
-            if (delay > AUTH_MAX_BACKOFF_S) delay = AUTH_MAX_BACKOFF_S;
-            ESP_LOGW(TAG, "auth failure #%u, backing off %u s", (unsigned)n, (unsigned)delay);
-            vTaskDelay(pdMS_TO_TICKS(delay * 1000));
-        } else {
-            ESP_LOGW(TAG, "auth failure #%u", (unsigned)n);
-        }
+        if (n <= 10 || (n & (n - 1)) == 0) ESP_LOGW(TAG, "auth failure #%u", (unsigned)n); /* rate-limit the log */
         httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer");
         return send_json(req, "401 Unauthorized", "{\"error\":\"unauthorized\"}");
     }
