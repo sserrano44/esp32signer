@@ -74,3 +74,49 @@ def test_lifi_quote_check():
     with pytest.raises(lifi.BadQuote, match="receiver"):
         lifi.check_quote(q, "0x2222222222222222222222222222222222222222", 500_000_000)
     assert evaluate(POLICY, tx(config.CELO, FIXTURE["to"], FIXTURE["data"]), SELF)[0]
+
+
+# --- LI.FI cost must come from the signed calldata, not the quote's metadata ---
+
+def _mutated_quote(fee=None, min_amount=None, to_amount_min="497000000"):
+    """The real LayerSwap calldata, with the encoded fee and/or BridgeData.minAmount replaced."""
+    from eth_abi import decode, encode
+    from eth_utils import keccak
+    data = bytes.fromhex(FIXTURE["data"][2:])
+    bridge, swaps, ls = decode(lifi.ARGS, data[4:])
+    bridge, swaps = list(bridge), [list(s) for s in swaps]
+    if fee is not None:
+        token, fees = decode(["address", "(address,uint256)[]"], swaps[0][5][4:])
+        swaps[0][5] = keccak(text=lifi.FEES_FN)[:4] + encode(["address", "(address,uint256)[]"],
+                                                             [token, [(fees[0][0], fee)]])
+    if min_amount is not None:
+        bridge[6] = min_amount
+    new = data[:4] + encode(lifi.ARGS, [tuple(bridge), [tuple(s) for s in swaps], ls])
+    return {"tool": "layerswap", "transactionRequest": {"to": FIXTURE["to"], "value": "0x0", "data": "0x" + new.hex()},
+            "estimate": {"toAmountMin": to_amount_min}}
+
+
+def test_lifi_reencoded_fixture_is_unchanged():
+    assert _mutated_quote()["transactionRequest"]["data"] == FIXTURE["data"]
+
+
+def test_lifi_inflated_fee_without_matching_min_amount_rejected():
+    with pytest.raises(lifi.BadQuote, match="minAmount"):
+        lifi.check_quote(_mutated_quote(fee=200_000_000), SELF, 500_000_000)
+
+
+def test_lifi_reduced_min_amount_rejected():
+    with pytest.raises(lifi.BadQuote, match="minAmount"):
+        lifi.check_quote(_mutated_quote(min_amount=1), SELF, 500_000_000)
+
+
+def test_lifi_encoded_fee_counts_even_if_estimate_hides_it():
+    # 200 USDC fee consistently encoded, while the estimate still claims 497 USDC arrives.
+    q = _mutated_quote(fee=200_000_000, min_amount=300_000_000)
+    received, bps = lifi.check_quote(q, SELF, 500_000_000)
+    assert received == 300_000_000 and round(bps) == 4000
+
+
+def test_lifi_inflated_to_amount_min_cannot_hide_encoded_fee():
+    received, bps = lifi.check_quote(_mutated_quote(to_amount_min="500000000"), SELF, 500_000_000)
+    assert received == 498_750_000 and round(bps) == 25  # the real 1.25 USDC LI.FI fee

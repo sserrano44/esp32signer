@@ -3,6 +3,7 @@
     python -m wars_arb.main status
     python -m wars_arb.main setup-approvals [--live]
     python -m wars_arb.main run [--live] [--once] [--paper-usdc 2000 --paper-wars 3000000]
+    python -m wars_arb.main resume     # clear a halt after reconciling both chains
 
 Without --live nothing is broadcast: every transaction is still built and
 signed by the device, which proves the policy accepts it.
@@ -61,6 +62,18 @@ def cmd_status(cfg: config.Config, args) -> None:
     state = State(cfg.state_file)
     state.refresh()
     print("in flight:", state.inflight or "none")
+    if state.failed:
+        print("FAILED transfers (recover manually):", state.failed)
+    print("HALTED:" if state.halt else "halt: none", state.halt or "")
+
+
+def cmd_resume(cfg: config.Config, args) -> None:
+    state = State(cfg.state_file)
+    if not state.halt:
+        print("not halted")
+        return
+    print("clearing halt:", state.halt)
+    state.clear_halt()
 
 
 def cmd_setup(cfg: config.Config, args) -> None:
@@ -88,6 +101,9 @@ class Bot:
     def step(self) -> None:
         s = self.cfg.strategy
         self.state.refresh()
+        if self.state.halt:
+            log.warning("HALTED (%s): not trading or rebalancing until `resume`", self.state.halt["reason"])
+            return
         bal = self.inventory()
         # Mid price (USDC per wARS) of every pool on every chain.
         prices = {k: {p: uniswap_v4.price_usdc_per_wars(c, p) for p in c.info.pools} for k, c in self.chains.items()}
@@ -116,11 +132,11 @@ class Bot:
                          best.rich, best.profit_usdc, s.min_profit_usdc)
             else:
                 self.execute(best)
-        if self.cfg.rebalance.enabled:
+        if self.cfg.rebalance.enabled and not self.state.halt:
             self.rebalance(self.inventory())
 
     def execute(self, opp: strategy.Opportunity) -> None:
-        slip = self.cfg.strategy.slippage_bps
+        s = self.cfg.strategy
         cheap, rich = self.chains[opp.cheap], self.chains[opp.rich]
         if self.args.live:
             for c in (cheap, rich):
@@ -132,23 +148,37 @@ class Bot:
                  f"{opp.wars / 1e18:,.0f}", opp.usdc_in / 1e6, cheap.info.name,
                  uniswap_v4.pool_name(opp.buy_pool or cheap.info.pools[0]), rich.info.name,
                  uniswap_v4.pool_name(opp.sell_pool or rich.info.pools[0]), opp.usdc_out / 1e6, opp.profit_usdc)
-        buy = uniswap_v4.swap_calldata(cheap.info, False, opp.usdc_in, strategy.min_out(opp.wars, slip),
-                                       pool=opp.buy_pool)
-        sell = uniswap_v4.swap_calldata(rich.info, True, opp.wars, strategy.min_out(opp.usdc_out, slip),
-                                        pool=opp.sell_pool)
+        # Minimum outputs leave each leg half the profit above min_profit as slack, so the
+        # round trip nets at least min_profit even if both legs fill at their minimum.
+        min_wars, min_usdc = strategy.leg_min_outs(opp, s.slippage_bps, s.min_profit_usdc)
+        buy = uniswap_v4.swap_calldata(cheap.info, False, opp.usdc_in, min_wars, pool=opp.buy_pool)
+        sell = uniswap_v4.swap_calldata(rich.info, True, opp.wars, min_usdc, pool=opp.sell_pool)
         legs = [self.pool.submit(cheap.send, cheap.info.router, buy, "swap USDC->wARS", None, 300_000),
                 self.pool.submit(rich.send, rich.info.router, sell, "swap wARS->USDC", None, 300_000)]
-        for f in legs:
+        self.check_legs(legs)
+
+    def check_legs(self, legs) -> None:
+        """Both legs must confirm. Anything else leaves inventory one-sided: halt."""
+        outcomes = []
+        for name, f in zip(("buy", "sell"), legs):
             try:
-                f.result()
+                r = f.result()
+                outcomes.append((name, r.ok, (r.tx_hash or "dry-run") if r.ok else f"REVERTED {r.tx_hash}"))
             except Exception as e:  # noqa: BLE001
-                log.error("leg failed: %s", e)
+                log.error("%s leg failed: %s", name, e)
+                outcomes.append((name, False, f"error: {e}"))
+        if not all(ok for _, ok, _ in outcomes):
+            self.state.set_halt("arb leg did not confirm", legs={n: d for n, _, d in outcomes})
 
     def rebalance(self, bal: Balances) -> None:
         r = self.cfg.rebalance
         fees = {k: ripio_bridge.route(c, config.other(c.info))[1] for k, c in self.chains.items()}
-        t = strategy.plan_wars_rebalance(bal.wars, self.state.inflight_to("wARS"), int(r.wars_min * 1e18),
-                                         int(r.wars_min_bridge * 1e18), max(fees.values()))
+        if max(fees.values()) > ripio_bridge.MAX_ROUTE_FEE:
+            log.warning("Ripio route fees %s are above %.0f wARS: wARS rebalancing skipped",
+                        {k: v / 1e18 for k, v in fees.items()}, ripio_bridge.MAX_ROUTE_FEE / 1e18)
+            fees = None
+        t = fees and strategy.plan_wars_rebalance(bal.wars, self.state.inflight_to("wARS"), int(r.wars_min * 1e18),
+                                                  int(r.wars_min_bridge * 1e18), max(fees.values()))
         if t:
             src, dst = self.chains[t.src], self.chains[t.dst]
             if ripio_bridge.mint_capacity(dst) < t.amount:
@@ -208,6 +238,7 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--once", action="store_true", help="one iteration, then exit")
     sp.add_argument("--paper-usdc", type=float, help="dry-run: pretend each chain holds this much USDC")
     sp.add_argument("--paper-wars", type=float, help="dry-run: pretend each chain holds this much wARS")
+    sub.add_parser("resume", help="clear a halt (after reconciling both chains)")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -220,7 +251,7 @@ def main(argv: list[str] | None = None) -> None:
     except ImportError:
         pass
     cfg = config.load(args.config)
-    {"status": cmd_status, "setup-approvals": cmd_setup, "run": cmd_run}[args.cmd](cfg, args)
+    {"status": cmd_status, "setup-approvals": cmd_setup, "run": cmd_run, "resume": cmd_resume}[args.cmd](cfg, args)
 
 
 if __name__ == "__main__":

@@ -128,12 +128,15 @@ def load(path: str | Path) -> Config:
     if not token:
         raise SystemExit("signer token missing: set SIGNER_TOKEN or signer.token_file")
     rpc = {k: c.default_rpc for k, c in CHAINS.items()} | (raw.get("rpc") or {})
+    strategy = StrategyConf(**(raw.get("strategy") or {}))
+    if not 0 <= strategy.slippage_bps <= 200:
+        raise SystemExit(f"strategy.slippage_bps must be 0..200, got {strategy.slippage_bps}")
     return Config(
         signer_url=os.environ.get("SIGNER_URL", s.get("url", "https://signer.local")),
         signer_ca=rel(os.environ.get("SIGNER_CA", s.get("ca"))),
         signer_token=token,
         rpc=rpc,
-        strategy=StrategyConf(**(raw.get("strategy") or {})),
+        strategy=strategy,
         rebalance=RebalanceConf(**(raw.get("rebalance") or {})),
         state_file=Path(rel(raw.get("state_file", "state.json"))),
     )

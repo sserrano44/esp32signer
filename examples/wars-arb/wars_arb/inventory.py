@@ -29,16 +29,41 @@ class InFlight:
 
 
 class State:
+    """Persistent bot state (state.json).
+
+    - inflight: bridge transfers not landed yet (counted toward the destination).
+    - failed: bridge transfers that a status API reported FAILED; kept for recovery.
+    - halt: set when something needs an operator (a one-sided arb, a failed
+      bridge transfer). While set, the bot neither trades nor rebalances.
+      `python -m wars_arb.main resume` clears it.
+    """
+
     def __init__(self, path: Path):
         self.path = path
         self.inflight: list[InFlight] = []
+        self.failed: list[InFlight] = []
+        self.halt: dict | None = None
         if path.exists():
-            self.inflight = [InFlight(**d) for d in json.loads(path.read_text()).get("inflight", [])]
+            d = json.loads(path.read_text())
+            self.inflight = [InFlight(**f) for f in d.get("inflight", [])]
+            self.failed = [InFlight(**f) for f in d.get("failed", [])]
+            self.halt = d.get("halt")
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"inflight": [asdict(f) for f in self.inflight]}, indent=1))
+        tmp.write_text(json.dumps({"inflight": [asdict(f) for f in self.inflight],
+                                   "failed": [asdict(f) for f in self.failed], "halt": self.halt}, indent=1))
         tmp.replace(self.path)
+
+    def set_halt(self, reason: str, **details) -> None:
+        log.error("ALERT: HALTED: %s %s. Reconcile both chains, then run `python -m wars_arb.main resume`.",
+                  reason, details or "")
+        self.halt = {"reason": reason, "time": time.time(), **details}
+        self.save()
+
+    def clear_halt(self) -> None:
+        self.halt = None
+        self.save()
 
     def add(self, f: InFlight) -> None:
         self.inflight.append(f)
@@ -52,8 +77,9 @@ class State:
         return out
 
     def refresh(self) -> None:
-        """Poll the bridge APIs and drop transfers that completed or failed."""
-        keep = []
+        """Poll the bridge APIs. Completed transfers are dropped; failed ones move to
+        `failed` and halt the bot, since their funds need manual recovery."""
+        keep, failed = [], []
         for f in self.inflight:
             try:
                 if f.kind == "ripio":
@@ -69,6 +95,8 @@ class State:
             if done:
                 (log.info if f.status in ("COMPLETED", "DONE") else log.error)(
                     "%s %s %s -> %s: %s after %.0f s", f.kind, f.asset, f.src, f.dst, f.status, time.time() - f.started)
+                if f.status == "FAILED":
+                    failed.append(f)
             elif time.time() - f.started > 6 * 3600:
                 log.error("%s transfer %s still %s after 6 h: check it manually", f.kind, f.tx, f.status)
                 keep.append(f)
@@ -76,7 +104,10 @@ class State:
                 keep.append(f)
         if len(keep) != len(self.inflight):
             self.inflight = keep
+            self.failed.extend(failed)
             self.save()
+        for f in failed:
+            self.set_halt(f"{f.kind} bridge transfer FAILED", tx=f.tx, asset=f.asset, src=f.src, dst=f.dst)
 
 
 @dataclass

@@ -47,7 +47,9 @@ def size_trade(
     """Try each ladder size; return the most profitable one (or None).
 
     Both legs are sized from inventory already on each chain, so they can be
-    sent at the same time without waiting for any bridge.
+    sent at the same time without waiting for any bridge. Every size is
+    quoted: when a chain has several pools, profit is not unimodal in size
+    (a shallow pool can win small sizes and a deep one larger sizes).
     """
     best: Opportunity | None = None
     for size in sorted(ladder_usdc):
@@ -63,8 +65,6 @@ def size_trade(
         opp = Opportunity(cheap, rich, usdc_in, wars, usdc_out, gas_usdc, buy_pool, sell_pool)
         if best is None or opp.profit_usdc > best.profit_usdc:
             best = opp
-        elif opp.profit_usdc < best.profit_usdc:
-            break  # past the optimum: price impact now eats the spread
         if size >= max_trade_usdc:
             break
     return best
@@ -78,6 +78,26 @@ def _quote(f: Callable, amount: int) -> tuple[int, object]:
 
 def min_out(amount: int, slippage_bps: float) -> int:
     return amount * int(1e4 - slippage_bps) // 10_000
+
+
+def leg_min_outs(opp: Opportunity, slippage_bps: float, min_profit_usdc: float) -> tuple[int, int]:
+    """(min wARS on the buy leg, min USDC on the sell leg).
+
+    The sell leg spends `opp.wars` from inventory while the buy leg may
+    return less; the sell leg may return less USDC. Each leg gets half of
+    the profit above `min_profit_usdc` as slack (capped at `slippage_bps`),
+    so even with both legs filled at their minimum the round trip still
+    nets at least `min_profit_usdc` (wARS valued at the sell price).
+    """
+    slack = int(min(max(0.0, (opp.profit_usdc - min_profit_usdc) / 2) * USDC,  # raw USDC per leg
+                    opp.usdc_out * slippage_bps / 1e4))
+    return opp.wars - opp.wars * slack // opp.usdc_out, opp.usdc_out - slack
+
+
+def worst_case_profit_usdc(opp: Opportunity, min_wars: int, min_usdc: int) -> float:
+    """Profit if both legs fill at their minimum: the wARS shortfall is valued at the sell price."""
+    shortfall_usdc = (opp.wars - min_wars) * opp.usdc_out / opp.wars
+    return (min_usdc - opp.usdc_in - shortfall_usdc) / USDC - opp.gas_usdc
 
 
 @dataclass(frozen=True)

@@ -122,7 +122,12 @@ class Chain:
                 raise
             self._nonce = tx["nonce"] + 1
         log.info("%s %s: sent %s%s", self.info.name, label, self.info.explorer, h.to_0x_hex())
-        rcpt = self.w3.eth.wait_for_transaction_receipt(h, timeout=180)
+        try:
+            rcpt = self.w3.eth.wait_for_transaction_receipt(h, timeout=180)
+        except Exception:
+            with self._lock:
+                self._nonce = None  # dropped or stuck: re-read the pending nonce before the next send
+            raise
         ok = rcpt["status"] == 1
         (log.info if ok else log.error)("%s %s: %s, gas used %d", self.info.name, label,
                                         "confirmed" if ok else "REVERTED", rcpt["gasUsed"])

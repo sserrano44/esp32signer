@@ -18,6 +18,11 @@ from .config import RIPIO_BRIDGE, WARS, ChainInfo
 API = "https://bridge.ripio.com/api"
 
 
+# The Base<->Celo route fee is a fixed 15 wARS. A larger value means the route
+# changed or the RPC is lying; the fee is added to every transfer, so bound it.
+MAX_ROUTE_FEE = 100 * 10**18
+
+
 def route(chain: Chain, dest: ChainInfo) -> tuple[bool, int]:
     """(enabled, fixed fee in wARS raw units) for wARS chain -> dest."""
     return chain.call(RIPIO_BRIDGE, "routeConfigs(address,uint256)", ["address", "uint256"],
@@ -42,6 +47,8 @@ def bridge_wars(chain: Chain, dest: ChainInfo, amount: int) -> list[Sent]:
     enabled, fee = route(chain, dest)
     if not enabled:
         raise RuntimeError(f"Ripio bridge route wARS {chain.info.name} -> {dest.name} is disabled")
+    if fee > MAX_ROUTE_FEE:
+        raise RuntimeError(f"Ripio route fee {fee / 1e18:g} wARS is above {MAX_ROUTE_FEE / 1e18:g}")
     if amount <= fee:
         raise RuntimeError(f"bridge amount must exceed the route fee ({fee / 1e18:g} wARS)")
     sent = []
@@ -63,4 +70,15 @@ def status(source_tx: str, source_chain_id: int) -> dict | None:
     if r.status_code == 404:
         return None
     r.raise_for_status()
-    return r.json().get("operation")
+    op = r.json().get("operation")
+    if op is not None:
+        check_operation(op, source_tx, source_chain_id)
+    return op
+
+
+def check_operation(op: dict, source_tx: str, source_chain_id: int) -> None:
+    """The API's answer must be about the transfer we asked for."""
+    if str(op.get("source_tx_hash", "")).lower() != source_tx.lower():
+        raise RuntimeError(f"Ripio status for {source_tx} names another tx: {op.get('source_tx_hash')!r}")
+    if int(op.get("source_chain_id", -1)) != source_chain_id:
+        raise RuntimeError(f"Ripio status for {source_tx} names chain {op.get('source_chain_id')!r}")

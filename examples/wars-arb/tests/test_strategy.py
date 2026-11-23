@@ -1,5 +1,7 @@
-from wars_arb.strategy import (USDC, WARS, Opportunity, min_out, plan_usdc_rebalance, plan_wars_rebalance,
-                               size_trade, spread_bps)
+import pytest
+
+from wars_arb.strategy import (USDC, WARS, Opportunity, leg_min_outs, min_out, plan_usdc_rebalance,
+                               plan_wars_rebalance, size_trade, spread_bps, worst_case_profit_usdc)
 
 PRICE_CHEAP = 1 / 1720  # USDC per wARS
 PRICE_RICH = 1 / 1770
@@ -93,3 +95,37 @@ def test_usdc_rebalance_only_celo_to_base():
 def test_opportunity_profit():
     o = Opportunity("base", "celo", 1000 * USDC, 0, 1010 * USDC, 0.5)
     assert o.profit_usdc == 9.5
+
+
+def test_size_trade_evaluates_whole_ladder():
+    # Profit dips at 100 and then rises again (a deeper pool takes over): the
+    # 250 size must still be found.
+    profit = {50: 1.0, 100: 0.5, 250: 3.0}
+    buy = lambda u: u * 10**12  # 1 USDC -> 1 wARS
+    sell = lambda w: w // 10**12 + int(profit[w // 10**18] * USDC)
+    opp = size_trade("base", "celo", [50, 100, 250], 250, 10_000 * USDC, 10**12 * WARS, buy, sell, 0.0)
+    assert opp is not None and opp.usdc_in == 250 * USDC
+
+
+@pytest.mark.parametrize("profit,slip", [(0.07, 30), (5.0, 30), (500.0, 30), (0.02, 30), (0.0, 30), (3.0, 0)])
+def test_leg_min_outs_keep_worst_case_above_min_profit(profit, slip):
+    usdc_in = 1000 * USDC
+    wars = 1_770_000 * WARS
+    gas = 0.03
+    opp = Opportunity("base", "celo", usdc_in, wars, usdc_in + int((profit + gas) * USDC), gas)
+    min_wars, min_usdc = leg_min_outs(opp, slip, 0.02)
+    assert 0 < min_wars <= wars and 0 < min_usdc <= opp.usdc_out
+    worst = worst_case_profit_usdc(opp, min_wars, min_usdc)
+    assert worst >= min(0.02, opp.profit_usdc) - 1e-6
+    # never looser than slippage_bps per leg
+    assert min_usdc >= min_out(opp.usdc_out, slip) and min_wars >= min_out(wars, slip) - 1
+
+
+def test_leg_min_outs_uses_profit_slack():
+    opp = Opportunity("base", "celo", 1000 * USDC, 1_770_000 * WARS, 1010 * USDC, 0.0)  # 10 USDC profit
+    min_wars, min_usdc = leg_min_outs(opp, 30, 2.0)
+    assert opp.usdc_out - min_usdc == 3_030_000  # capped at 30 bps of 1010 USDC (< 4 USDC half-slack)
+    opp = Opportunity("base", "celo", 1000 * USDC, 1_770_000 * WARS, 1001 * USDC, 0.0)  # 1 USDC profit
+    min_wars, min_usdc = leg_min_outs(opp, 30, 0.5)
+    assert opp.usdc_out - min_usdc == 250_000  # (1 - 0.5) / 2
+    assert worst_case_profit_usdc(opp, min_wars, min_usdc) == pytest.approx(0.5, abs=1e-5)

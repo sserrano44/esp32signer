@@ -175,7 +175,7 @@ contracts:
   #
   # Pinned: BridgeData (USDC, receiver = self, destination 8453, no destination
   # call), exactly one SwapData that calls the LI.FI FeeCollector's
-  # forwardERC20Fees(USDC, [(LI.FI fee wallet, amount < 2^28 = ~268 USDC)]),
+  # forwardERC20Fees(USDC, [(LI.FI fee wallet, amount < 2^24 = ~16.7 USDC)]),
   # and LayerSwapData.refundRecipient = self, nonEVMReceiver = 0.
   #
   # Trust note: the LayerSwap facet sends funds to the LayerSwap depository,
@@ -214,7 +214,7 @@ contracts:
           {{sel:forwardERC20Fees(address,(address,uint256)[])}}
           {{addr:usdc_celo}}{{u256:0x40}}{{u256:1}}
           {{addr:lifi_fee_wallet}}
-          000000000000000000000000000000000000000000000000000000000[0-9a-f]{7}   # fee amount
+          0000000000000000000000000000000000000000000000000000000000[0-9a-f]{6}  # fee amount < 2^24 (~16.7 USDC; real: 0.25%)
           00000000000000000000000000000000000000000000000000000000           # padding
           # LayerSwapData
           {{uint}}                                      # requestId

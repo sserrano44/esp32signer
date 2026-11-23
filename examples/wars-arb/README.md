@@ -27,8 +27,10 @@ Every `poll_seconds`, the bot:
    Each size is limited by the USDC already on the cheap chain and the wARS
    already on the expensive chain.
 3. If the profit is at least `min_profit_usdc`, it sends both swaps at the same
-   time, one per chain. Each swap sets `amountOutMinimum` to the quote minus
-   `slippage_bps`.
+   time, one per chain. Each swap's `amountOutMinimum` gives that leg half of
+   the profit above `min_profit_usdc` as slack, capped at `slippage_bps`. Even
+   if both legs fill at their minimum, the round trip still nets `min_profit_usdc`.
+   If either leg reverts or its outcome is unknown, the bot **halts** (see below).
 4. Rebalances:
    - **wARS:** when a chain falls below `wars_min`, counting transfers still in
      flight, the bot calls `depositForBridge` on the chain with more wARS and
@@ -37,10 +39,25 @@ Every `poll_seconds`, the bot:
    - **USDC:** when Base falls below `usdc_min`, the bot moves USDC from Celo to
      Base through LI.FI using LayerSwap. Before signing, it decodes the quote and
      checks that the receiver, refund recipient and destination match what it
-     asked for. It approves exactly the amount being sent and skips the transfer
-     if the cost is above `lifi_max_fee_bps`.
+     asked for. The cost is computed from the signed calldata (the encoded LI.FI
+     fee and `minAmount`), not only from the quote's estimate. The transfer is skipped
+     if the cost is above `lifi_max_fee_bps`. The bot approves exactly the amount
+     being sent and revokes the approval if the transfer fails.
 
-In-flight transfers are saved in `state.json`.
+In-flight transfers are saved in `state.json`. A status API answer only counts if
+it names the transfer that was asked about. A transfer reported FAILED is kept
+in `state.json` under `failed` and halts the bot.
+
+### Halt and resume
+
+The bot halts when something needs a person: an arb where one leg did not
+confirm, which leaves inventory one-sided, or a failed bridge transfer. The halt is
+saved in `state.json`, so it survives restarts. While halted, the bot neither
+trades nor rebalances. `status` shows why it halted. Check both chains, then:
+
+```sh
+python -m wars_arb.main resume
+```
 
 ### Moving USDC from Base to Celo
 
@@ -96,9 +113,13 @@ signed by the device, so the device log shows it accepted them, but nothing is b
 
 A compromised bot is limited to the following:
 
-- **Swapping at a bad price** in the two pinned pools, because the device does not check
+- **Swapping at a bad price** in the pinned pools, because the device does not check
   `amountOutMinimum`. Keep inventory sized to what you can afford to lose to a
   sandwich or a manipulated pool.
+- **Trusting the RPC.** Prices, quotes, balances and receipts all come from one
+  RPC per chain. A malicious RPC can fake a quote, or drop one leg, so the other leg
+  executes alone. The halt stops this after the first time; it doesn't prevent it.
+  Use RPC endpoints you trust.
 - **Wasting gas**, up to the per-chain caps × `rate_per_minute` (30/min).
 - **Bridging** wARS between Base and Celo, and USDC from Celo to Base, always to the signer itself.
   The LI.FI/LayerSwap path depends on LI.FI's backend signature and on LayerSwap

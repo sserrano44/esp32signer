@@ -78,6 +78,7 @@ def lifi(replace=None):
 
 
 S, E = SELF[2:], EVIL[2:]
+FEE_WORD = f"{1_250_000:064x}"  # the LI.FI fee (1.25 USDC) encoded in the captured quote
 FEE_WALLET = "c06ebbefd94032b85424d51906e2a335efae264b"
 
 CASES = [
@@ -124,6 +125,9 @@ CASES = [
     ("lifi destination call", tx(42220, LIFI["to"], lifi(("0" * 63 + "1" + "0" * 64 + "0" * 63 + "9",
                                                          "0" * 63 + "1" + "0" * 63 + "1" + "0" * 63 + "9"))), False),
     ("lifi trailing bytes", tx(42220, LIFI["to"], lifi() + "00"), False),
+    ("lifi fee just under the cap", tx(42220, LIFI["to"], lifi((FEE_WORD, f"{2**24 - 1:064x}"))), True),
+    ("lifi fee at the cap (16.7 USDC)", tx(42220, LIFI["to"], lifi((FEE_WORD, f"{2**24:064x}"))), False),
+    ("lifi fee 200 USDC", tx(42220, LIFI["to"], lifi((FEE_WORD, f"{200 * 10**6:064x}"))), False),
     ("native transfer", tx(8453, EVIL, "0x", value=1), False),
     ("usdc transfer", tx(8453, BASE["usdc"], "0xa9059cbb" + "0" * 24 + E + "f" * 64), False),
 ]
