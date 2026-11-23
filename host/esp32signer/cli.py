@@ -73,26 +73,23 @@ def cmd_provision(args) -> None:
     if args.api_token and len(args.api_token) < 32:
         sys.exit("error: --api-token must be at least 32 characters")
 
+    # Reserve the backup file before the device generates anything, so a bad
+    # path aborts while the old key is still in place.
+    backup_fd = None
+    if args.generate_key and args.key_backup_file:
+        try:
+            backup_fd = os.open(args.key_backup_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError as e:
+            sys.exit(f"error: cannot create key backup file: {e}")
+
     with _device(args) as d:
         info = d.call("info")
         print(f"device firmware {info.get('firmware')}, address {info.get('address', '(no key)')}")
 
         if args.generate_key:
-            r = d.call("generate_key", force=args.force_key)
-            print("\n" + "!" * 72)
-            print("NEW SIGNER KEY. Back up this private key OFFLINE now; it is shown only once.")
-            print(f"  address:     {r['address']}")
-            print(f"  private key: {r['private_key']}")
-            print("!" * 72 + "\n")
-            if args.key_backup_file:
-                fd = os.open(args.key_backup_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd, "w") as f:
-                    f.write(f"address={r['address']}\nprivate_key={r['private_key']}\n")
-                print(f"key backup written to {args.key_backup_file} (mode 600)")
+            _generate_key(d, args, backup_fd)
         elif args.import_key_file:
-            pk = Path(args.import_key_file).read_text().strip()
-            if pk.startswith("private_key="):
-                pk = pk.split("=", 1)[1]
+            pk = _read_key_file(Path(args.import_key_file))
             r = d.call("import_key", private_key=pk, force=args.force_key)
             print(f"imported key, address {r['address']}")
 
@@ -122,6 +119,7 @@ def cmd_provision(args) -> None:
             d.call("set_api_token", token=token)
             print("api token set")
 
+        _commit(d)
         final = d.call("info")
         missing = [k for k, v in final["provisioned"].items() if not v]
         print("\nprovisioned:", ", ".join(k for k, v in final["provisioned"].items() if v) or "nothing")
@@ -130,6 +128,62 @@ def cmd_provision(args) -> None:
         else:
             print(f"ready. Reboot (esp32signer reboot --port {args.port}) to start signing at "
                   f"https://{final['hostname']}.local/")
+
+
+def _generate_key(d, args, backup_fd: int | None) -> None:
+    """Two-phase: the device returns a candidate key, we save it, then confirm_key stores it.
+
+    Until confirm_key the device keeps its old key; if anything here fails the
+    candidate is simply discarded.
+    """
+    try:
+        r = d.call("generate_key", force=args.force_key)
+        if backup_fd is not None:
+            with os.fdopen(backup_fd, "w") as f:
+                backup_fd = None
+                f.write(f"address={r['address']}\nprivate_key={r['private_key']}\n")
+                f.flush()
+                os.fsync(f.fileno())
+    except BaseException:
+        if backup_fd is not None:
+            os.close(backup_fd)
+        if args.key_backup_file and Path(args.key_backup_file).stat().st_size == 0:
+            os.unlink(args.key_backup_file)  # nothing written: don't leave a placeholder
+        raise
+    print("\n" + "!" * 72)
+    print("NEW SIGNER KEY. Back up this private key OFFLINE now; it is shown only once.")
+    print(f"  address:     {r['address']}")
+    print(f"  private key: {r['private_key']}")
+    print("!" * 72 + "\n")
+    if args.key_backup_file:
+        print(f"key backup written to {args.key_backup_file} (mode 600)")
+    if r.get("pending"):
+        c = d.call("confirm_key", address=r["address"])
+        print(f"key stored on the device: {c['address']}")
+    else:
+        print("WARNING: old firmware stored the key before the backup was confirmed; upgrade the firmware")
+
+
+def _read_key_file(path: Path) -> str:
+    """A raw 0x key, or a backup written by --key-backup-file (address=..., private_key=...)."""
+    text = path.read_text().strip()
+    if "=" not in text:
+        return text
+    keys = [line.split("=", 1)[1].strip() for line in text.splitlines() if line.strip().startswith("private_key=")]
+    if len(keys) != 1:
+        sys.exit(f"error: {path} must contain exactly one private_key= line")
+    return keys[0]
+
+
+def _commit(d) -> None:
+    """Clear the device's provisioning-in-progress mark: signer mode refuses to start without it."""
+    from .serial_proto import DeviceError
+    try:
+        d.call("commit")
+    except DeviceError as e:
+        if "unknown cmd" not in str(e):
+            raise
+        print("note: firmware has no commit command (older firmware)")
 
 
 def cmd_wipe(args) -> None:

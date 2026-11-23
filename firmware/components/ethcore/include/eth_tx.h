@@ -54,6 +54,11 @@ int eth_tx_encode_signed(const eth_tx_t *tx, int recid, const uint8_t r[32], con
 struct cJSON;
 int eth_tx_from_json(const struct cJSON *obj, eth_tx_t *tx, char *err, size_t errlen);
 
+/* Name of the first object member that repeats a sibling's name, at any
+ * depth, or NULL. cJSON keeps duplicates and lookups return the first, while
+ * many other parsers keep the last: strict inputs reject them. */
+const char *json_duplicate_key(const struct cJSON *item);
+
 #ifdef __cplusplus
 }
 #endif

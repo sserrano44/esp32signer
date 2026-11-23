@@ -27,13 +27,25 @@ policy already allows.
   policy, WiFi, cert or token needs provision mode, which needs the BOOT button
   and USB.
 - **API token.** Required on every request. The device stores only its sha256
-  and compares in constant time. After 10 consecutive failures it backs off up
-  to 30 s per attempt.
+  and compares in constant time. Bad tokens are refused immediately (no sleep
+  that would stall the single server task) and counted in `signer_status`.
 - **TLS.** ECDSA P-256 certificate with a SAN for `<hostname>.local`; clients
   should verify it against your local CA.
 - **Key handling.** The key is read from NVS only while signing and is zeroed
   after use. Signing uses libsecp256k1 (constant time, RFC6979, low-s) with a
   blinded context. `wipe` physically erases the signer partition.
+- **No silent key loss.** The signer partition is never erased automatically.
+  If NVS cannot be opened (e.g. after a firmware downgrade, NEW_VERSION_FOUND),
+  the device halts with the red LED instead. Reflash the firmware that wrote it, or
+  enter provision mode and `wipe` on purpose.
+- **Key generation is two-phase.** `generate_key` returns a candidate kept in
+  RAM only. The CLI writes and fsyncs the backup file first and then sends
+  `confirm_key`, which is the moment the key is stored and any old key is
+  replaced. A lost reply or reset before that leaves the old key in place.
+- **Interrupted provisioning fails closed.** The first change in a provisioning
+  session sets a mark in NVS that the final `commit` clears. Signer mode refuses
+  to start while the mark is set, so a half-applied session (for example, a new key
+  with the old token) never serves requests.
 
 ## Residual risks (read these)
 

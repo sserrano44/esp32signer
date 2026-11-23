@@ -1,7 +1,9 @@
 #include "policy.h"
 #include "cJSON.h"
+#include "eth_tx.h"
 #include "hex.h"
 #include "regex.h"
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -385,8 +387,20 @@ static int load(policy_t *p, const cJSON *root, const uint8_t *self, char *err, 
 int policy_load(const char *json, size_t len, const uint8_t *self_addr, policy_t **out, char *err, size_t errlen)
 {
     *out = NULL;
-    cJSON *root = cJSON_ParseWithLength(json, len);
+    const char *end = NULL;
+    cJSON *root = cJSON_ParseWithLengthOpts(json, len, &end, 0);
     if (!root) return fail(err, errlen, "policy is not valid JSON");
+    for (; end < json + len; end++) /* stored blobs may carry a trailing NUL */
+        if (*end && !isspace((unsigned char)*end)) {
+            cJSON_Delete(root);
+            return fail(err, errlen, "trailing data after the policy JSON");
+        }
+    const char *dup = json_duplicate_key(root);
+    if (dup) {
+        fail(err, errlen, "duplicate key '%s'", dup); /* dup points into root */
+        cJSON_Delete(root);
+        return -1;
+    }
     policy_t *p = calloc(1, sizeof(*p));
     if (!p) {
         cJSON_Delete(root);

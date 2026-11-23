@@ -116,7 +116,11 @@ esp_err_t https_server_start(const char *cert_pem, size_t cert_len, const char *
         return err;
     }
     const httpd_uri_t post = {.uri = "/", .method = HTTP_POST, .handler = rpc_post};
-    httpd_register_uri_handler(server, &post);
+    if ((err = httpd_register_uri_handler(server, &post)) != ESP_OK) {
+        ESP_LOGE(TAG, "registering the RPC handler failed: %s", esp_err_to_name(err));
+        httpd_ssl_stop(server);
+        return err;
+    }
     ESP_LOGI(TAG, "JSON-RPC listening on https://%s.local:%d/", g_app.hostname, CONFIG_SIGNER_HTTPS_PORT);
     return ESP_OK;
 }

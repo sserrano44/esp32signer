@@ -28,8 +28,8 @@ esp32signer reboot --port ...
 
 | Option | Effect |
 |---|---|
-| `--generate-key [--key-backup-file F]` | Key generated on-device from the hardware TRNG. **Printed once**, so back it up offline. |
-| `--import-key-file F` | Import a 0x-hex private key (or a `private_key=` line) |
+| `--generate-key [--key-backup-file F]` | Key generated on-device from the hardware TRNG. **Printed once**, so back it up offline. The backup file is created before the key is generated, and the device stores the key only after the backup is on disk. |
+| `--import-key-file F` | Import a 0x-hex private key, or a backup written by `--key-backup-file` |
 | `--force-key` | Allow replacing an existing key |
 | `--policy P.yaml` | Compiled locally, then validated and compiled again on the device; the sha256 hashes are compared |
 | `--wifi-ssid S --wifi-pass P` | WPA2 network to join |
@@ -38,6 +38,8 @@ esp32signer reboot --port ...
 | `--api-token T` / `--rotate-api-token` | Bearer token, at least 32 characters. If the device has none, one is generated and printed once. The device stores only its sha256. |
 
 The device refuses to serve until it has all of: key, policy, WiFi, TLS and an API token.
+`provision` ends with `commit`. If a session is interrupted before that, the
+device stays out of signer mode until you run `provision` again.
 
 ## TLS certificates
 
@@ -67,11 +69,14 @@ connection, so later requests skip both the lookup and the TLS handshake.
 
 The host sends one JSON object per line: `{"id":1,"cmd":"info"}`. The device
 replies on one line prefixed with `@@`: `@@{"id":1,"ok":true,"result":{...}}`.
-Lines without the prefix are logs. Commands: `info`, `generate_key {force}`,
-`import_key {private_key, force}`, `set_policy {policy_b64}`,
-`set_wifi {ssid, password}`, `set_hostname {hostname}`,
+Lines without the prefix are logs. Commands: `info`,
+`generate_key {force}` (returns a candidate, not yet stored),
+`confirm_key {address}` (stores the candidate), `import_key {private_key, force}`,
+`set_policy {policy_b64}`, `set_wifi {ssid, password}`, `set_hostname {hostname}`,
 `set_tls {cert_pem_b64, key_pem_b64}`, `set_api_token {token}`,
-`wipe {confirm:true}`, `reboot`.
+`commit` (ends a session), `wipe {confirm:true}`, `reboot`.
+The first command in a session that changes anything marks the configuration
+incomplete until `commit`.
 
 Open the port with DTR and RTS deasserted. On the S3's USB Serial/JTAG they
 emulate the auto-reset circuit, so asserting them resets the chip.

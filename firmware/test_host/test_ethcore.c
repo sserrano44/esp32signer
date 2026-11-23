@@ -173,6 +173,14 @@ static void test_parse_errors(void)
     snprintf(buf, sizeof(buf), "{%s,\"gasPrice\":\"0x1\",\"data\":\"0x0\"}", base);
     expect_parse_error(buf, "data");
     expect_parse_error("{\"chainId\":\"0x1\",\"nonce\":\"0x1\",\"gas\":\"0x1\",\"gasPrice\":\"0x1\",\"to\":\"0x12\"}", "'to'");
+    /* duplicate members: cJSON would use the first, other parsers the last */
+    snprintf(buf, sizeof(buf), "{%s,\"gasPrice\":\"0x1\",\"to\":\"0x2222222222222222222222222222222222222222\"}", base);
+    expect_parse_error(buf, "duplicate field 'to'");
+    snprintf(buf, sizeof(buf), "{%s,\"gasPrice\":\"0x1\",\"value\":\"0x0\",\"value\":\"0x1\"}", base);
+    expect_parse_error(buf, "duplicate field 'value'");
+    snprintf(buf, sizeof(buf), "{%s,\"maxFeePerGas\":\"0x1\",\"maxPriorityFeePerGas\":\"0x1\",\"accessList\":"
+             "[{\"address\":\"0x1111111111111111111111111111111111111111\",\"storageKeys\":[],\"storageKeys\":[]}]}", base);
+    expect_parse_error(buf, "duplicate field 'storageKeys'");
 }
 
 int main(int argc, char **argv)

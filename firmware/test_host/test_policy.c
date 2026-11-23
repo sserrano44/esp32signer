@@ -339,6 +339,29 @@ static void load_bad(const char *json, const char *needle, int with_self)
 static void test_policy_load(void)
 {
     load_bad("not json", "not valid JSON", 1);
+    {
+        /* strict JSON: duplicates at any level, trailing data */
+        const char *ok = "{\"version\":1,\"chain_ids\":[1]," LIM ",\"native_transfers\":[{\"to\":\"" TREASURY
+                         "\",\"max_value\":\"0\"}]}";
+        load_bad("{\"version\":1,\"version\":1,\"chain_ids\":[1]," LIM "}", "duplicate key 'version'", 1);
+        load_bad("{\"version\":1,\"chain_ids\":[1]," LIM ",\"limits\":{\"max_gas\":99,\"max_fee_per_gas\":\"9\","
+                 "\"max_priority_fee_per_gas\":\"9\"}}", "duplicate key 'limits'", 1);
+        load_bad("{\"version\":1,\"chain_ids\":[1]," LIM ",\"native_transfers\":[{\"to\":\"" TREASURY
+                 "\",\"max_value\":\"0\",\"max_value\":\"99\"}]}", "duplicate key 'max_value'", 1);
+        char buf[512];
+        snprintf(buf, sizeof(buf), "%s{}", ok);
+        load_bad(buf, "trailing data", 1);
+        snprintf(buf, sizeof(buf), "%s x", ok);
+        load_bad(buf, "trailing data", 1);
+        uint8_t self[20];
+        addr_from_hex(SELF, self);
+        policy_t *p = NULL;
+        char err[200] = "";
+        snprintf(buf, sizeof(buf), "%s \n", ok);
+        int rc = policy_load(buf, strlen(buf) + 1, self, &p, err, sizeof(err)); /* whitespace + stored NUL */
+        CHECK(rc == 0, "trailing whitespace/NUL rejected: %s", err);
+        policy_free(p);
+    }
     load_bad("{\"version\":2,\"chain_ids\":[1]," LIM "}", "version", 1);
     load_bad("{\"version\":1,\"chain_ids\":[]," LIM "}", "chain_ids", 1);
     load_bad("{\"version\":1,\"chain_ids\":[1]," LIM ",\"extra\":1}", "unknown key 'extra'", 1);

@@ -9,6 +9,15 @@
  *   @@{"id":1,"ok":false,"error":"..."}
  *
  * Only reachable after a physical BOOT press. WiFi and HTTPS are off here.
+ *
+ * Key generation is two-phase: generate_key returns a candidate kept only in
+ * RAM; confirm_key (sent after the host has saved its backup) stores it,
+ * replacing any previous key only then. A lost reply or a reset before
+ * confirm_key leaves the stored key untouched.
+ *
+ * The first change in a session marks the configuration dirty in NVS; the
+ * final "commit" clears the mark. Signer mode refuses to start while it is
+ * set, so an interrupted session never serves a half-old, half-new config.
  */
 #include "provision.h"
 #include "bootloader_random.h"
@@ -37,6 +46,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static const char *TAG = "provision";
 
@@ -68,23 +78,28 @@ static void write_all(const char *s, size_t len)
 
 static void reply(const cJSON *id, cJSON *result, const char *error)
 {
+    char *s = NULL;
     cJSON *r = cJSON_CreateObject();
-    cJSON_AddItemToObject(r, "id", id ? cJSON_Duplicate(id, 1) : cJSON_CreateNull());
-    cJSON_AddBoolToObject(r, "ok", error == NULL);
-    if (error)
-        cJSON_AddStringToObject(r, "error", error);
-    else
-        cJSON_AddItemToObject(r, "result", result ? result : cJSON_CreateObject());
-    char *s = cJSON_PrintUnformatted(r);
+    if (r && cJSON_AddItemToObject(r, "id", id ? cJSON_Duplicate(id, 1) : cJSON_CreateNull()) &&
+        cJSON_AddBoolToObject(r, "ok", error == NULL) &&
+        (error ? cJSON_AddStringToObject(r, "error", error) != NULL
+               : cJSON_AddItemToObject(r, "result", result ? result : cJSON_CreateObject())))
+        s = cJSON_PrintUnformatted(r);
     /* The generate_key result carries the private key: wipe before freeing. */
     const cJSON *pk = result ? cJSON_GetObjectItemCaseSensitive(result, "private_key") : NULL;
     if (cJSON_IsString(pk)) eth_memzero(pk->valuestring, strlen(pk->valuestring));
+    bool attached = result && r && cJSON_GetObjectItemCaseSensitive(r, "result") == result;
+    if (result && !attached) cJSON_Delete(result);
     cJSON_Delete(r);
-    if (!s) return;
+    if (!s) {
+        static const char oom[] = "@@{\"id\":null,\"ok\":false,\"error\":\"out of memory\"}\n";
+        write_all(oom, sizeof(oom) - 1);
+        return;
+    }
     write_all("@@", 2);
     write_all(s, strlen(s));
     write_all("\n", 1);
-    usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(1000));
+    if (usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(1000)) != ESP_OK) ESP_LOGW(TAG, "reply not fully sent");
     eth_memzero(s, strlen(s));
     cJSON_free(s);
 }
@@ -157,14 +172,29 @@ static cJSON *cmd_info(const cJSON *req, cmd_ctx_t *c)
 static cJSON *key_result(void)
 {
     cJSON *r = cJSON_CreateObject();
-    cJSON_AddStringToObject(r, "address", g_app.address_hex);
+    if (r && !cJSON_AddStringToObject(r, "address", g_app.address_hex)) {
+        cJSON_Delete(r);
+        return NULL;
+    }
     return r;
+}
+
+/* Candidate from generate_key, stored only by confirm_key. RAM only. */
+static uint8_t s_pending_key[32];
+static char s_pending_addr[43];
+static bool s_pending;
+
+static void drop_pending(void)
+{
+    eth_memzero(s_pending_key, sizeof(s_pending_key));
+    s_pending = false;
 }
 
 static cJSON *cmd_generate_key(const cJSON *req, cmd_ctx_t *c)
 {
     if (store_has(STORE_KEY_PRIVKEY) && !get_bool(req, "force"))
         return fail(c, "a key already exists; pass force=true to replace it (old key is lost unless backed up)");
+    drop_pending();
 
     /* SAR-ADC entropy source: RF is off in provision mode, so enable it explicitly. */
     uint8_t ent[64], key[32];
@@ -177,22 +207,54 @@ static cJSON *cmd_generate_key(const cJSON *req, cmd_ctx_t *c)
     } while (!eth_privkey_valid(key));
     eth_memzero(ent, sizeof(ent));
 
-    esp_err_t err = store_set_blob(STORE_KEY_PRIVKEY, key, 32);
-    if (err != ESP_OK) {
+    uint8_t addr[20];
+    if (eth_address_from_privkey(key, addr) != 0) {
         eth_memzero(key, sizeof(key));
-        return fail(c, "store failed: %s", esp_err_to_name(err));
+        return fail(c, "key derivation failed");
     }
     char hexkey[67] = "0x";
     hex_encode(key, 32, hexkey + 2);
+    memcpy(s_pending_key, key, 32);
     eth_memzero(key, sizeof(key));
-    if (signer_app_load_address() != ESP_OK) return fail(c, "key derivation failed");
+    addr_to_checksum_hex(addr, s_pending_addr);
 
-    cJSON *r = key_result();
-    /* Returned ONCE so it can be backed up offline. */
-    cJSON_AddStringToObject(r, "private_key", hexkey);
+    /* Returned so the host can back it up; NOT stored until confirm_key. */
+    cJSON *r = cJSON_CreateObject();
+    if (!r || !cJSON_AddStringToObject(r, "address", s_pending_addr) ||
+        !cJSON_AddStringToObject(r, "private_key", hexkey) || !cJSON_AddTrueToObject(r, "pending")) {
+        eth_memzero(hexkey, sizeof(hexkey));
+        if (r) {
+            const cJSON *pk = cJSON_GetObjectItemCaseSensitive(r, "private_key");
+            if (cJSON_IsString(pk)) eth_memzero(pk->valuestring, strlen(pk->valuestring));
+            cJSON_Delete(r);
+        }
+        drop_pending();
+        return fail(c, "out of memory");
+    }
     eth_memzero(hexkey, sizeof(hexkey));
-    ESP_LOGW(TAG, "new key generated: %s", g_app.address_hex);
+    s_pending = true;
+    ESP_LOGW(TAG, "candidate key generated: %s (send confirm_key to store it)", s_pending_addr);
     return r;
+}
+
+static cJSON *cmd_confirm_key(const cJSON *req, cmd_ctx_t *c)
+{
+    const char *a = get_str(req, "address");
+    if (!s_pending) return fail(c, "no generated key pending (run generate_key first)");
+    if (!a || strcasecmp(a, s_pending_addr) != 0) return fail(c, "address does not match the pending key");
+    esp_err_t err = store_set_blob(STORE_KEY_PRIVKEY, s_pending_key, 32);
+    drop_pending();
+    if (err != ESP_OK) return fail(c, "store failed: %s", esp_err_to_name(err));
+    if (signer_app_load_address() != ESP_OK) return fail(c, "key derivation failed");
+    ESP_LOGW(TAG, "new key stored: %s", g_app.address_hex);
+    return key_result();
+}
+
+static cJSON *cmd_commit(const cJSON *req, cmd_ctx_t *c)
+{
+    esp_err_t err = store_erase_key(STORE_KEY_PROV_DIRTY);
+    if (err != ESP_OK) return fail(c, "store failed: %s", esp_err_to_name(err));
+    return cJSON_CreateObject();
 }
 
 static cJSON *cmd_import_key(const cJSON *req, cmd_ctx_t *c)
@@ -350,6 +412,7 @@ static const struct {
 } CMDS[] = {
     {"info", cmd_info},
     {"generate_key", cmd_generate_key},
+    {"confirm_key", cmd_confirm_key},
     {"import_key", cmd_import_key},
     {"set_policy", cmd_set_policy},
     {"set_wifi", cmd_set_wifi},
@@ -357,7 +420,19 @@ static const struct {
     {"set_tls", cmd_set_tls},
     {"set_api_token", cmd_set_api_token},
     {"wipe", cmd_wipe},
+    {"commit", cmd_commit},
 };
+
+/* Commands that change stored configuration: the first one in a session
+ * marks it dirty until "commit". */
+static bool mutates(const char *cmd)
+{
+    static const char *const M[] = {"confirm_key", "import_key", "set_policy", "set_wifi",
+                                    "set_hostname", "set_tls", "set_api_token"};
+    for (size_t i = 0; i < sizeof(M) / sizeof(M[0]); i++)
+        if (!strcmp(cmd, M[i])) return true;
+    return false;
+}
 
 static void handle_line(char *line)
 {
@@ -381,6 +456,9 @@ static void handle_line(char *line)
             if (!strcmp(cmd, CMDS[i].name)) fn = CMDS[i].fn;
         if (!fn) {
             reply(id, NULL, "unknown cmd");
+        } else if (mutates(cmd) && !store_has(STORE_KEY_PROV_DIRTY) &&
+                   store_set_str(STORE_KEY_PROV_DIRTY, "1") != ESP_OK) {
+            reply(id, NULL, "store failed (cannot mark provisioning in progress)");
         } else {
             cmd_ctx_t c = {0};
             cJSON *r = fn(req, &c);

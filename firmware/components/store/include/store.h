@@ -20,6 +20,9 @@ extern "C" {
 #define STORE_KEY_TLS_CERT "tls_cert"
 #define STORE_KEY_TLS_KEY "tls_key"
 #define STORE_KEY_API_TOKEN_HASH "api_tok_hash"
+/* Set by the first change in a provisioning session, cleared by its final
+ * "commit": signer mode refuses to start on a half-applied configuration. */
+#define STORE_KEY_PROV_DIRTY "prov_dirty"
 
 esp_err_t store_init(void);
 bool store_has(const char *key);

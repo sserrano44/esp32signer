@@ -53,8 +53,9 @@ esp_err_t signer_app_crypto_init(void)
     bootloader_random_disable();
     int rc = eth_signer_init(seed);
     eth_memzero(seed, sizeof(seed));
+    if (rc != 0) return ESP_FAIL;
     if (!g_app.lock) g_app.lock = xSemaphoreCreateMutex();
-    return rc == 0 ? ESP_OK : ESP_FAIL;
+    return g_app.lock ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 esp_err_t signer_app_load_address(void)
@@ -72,6 +73,10 @@ esp_err_t signer_app_load_address(void)
 
 esp_err_t signer_app_load(char *err, size_t errlen)
 {
+    if (store_has(STORE_KEY_PROV_DIRTY)) {
+        snprintf(err, errlen, "provisioning was interrupted (no commit): provision again");
+        return ESP_ERR_INVALID_STATE;
+    }
     char missing[96] = "";
     if (signer_app_load_address() != ESP_OK) strlcat(missing, " key", sizeof(missing));
     if (!store_has(STORE_KEY_POLICY)) strlcat(missing, " policy", sizeof(missing));

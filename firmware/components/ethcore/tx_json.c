@@ -89,10 +89,26 @@ static int parse_access_list(const cJSON *al, eth_tx_t *tx, char *err, size_t er
     return 0;
 }
 
+const char *json_duplicate_key(const cJSON *item)
+{
+    const cJSON *a, *b;
+    cJSON_ArrayForEach(a, item)
+    {
+        if (cJSON_IsObject(item))
+            for (b = a->next; b; b = b->next)
+                if (a->string && b->string && !strcmp(a->string, b->string)) return a->string;
+        const char *d = json_duplicate_key(a);
+        if (d) return d;
+    }
+    return NULL;
+}
+
 int eth_tx_from_json(const cJSON *obj, eth_tx_t *tx, char *err, size_t errlen)
 {
     memset(tx, 0, sizeof(*tx));
     if (!cJSON_IsObject(obj)) return fail(err, errlen, "transaction must be an object");
+    const char *dup = json_duplicate_key(obj);
+    if (dup) return fail(err, errlen, "duplicate field '%s'", dup);
 
     static const char *forbidden[] = {"authorizationList", "blobVersionedHashes", "maxFeePerBlobGas", "blobs"};
     for (size_t i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); i++)

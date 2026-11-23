@@ -59,10 +59,10 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
-    if ((err = store_init()) != ESP_OK) {
-        halt_with_error("signer storage init failed");
-        return;
-    }
+    /* On failure, keep going as far as provision mode, where `wipe` is the
+     * explicit (physically gated) recovery; the partition is never erased
+     * automatically. */
+    esp_err_t store_err = store_init();
     if (signer_app_crypto_init() != ESP_OK) {
         halt_with_error("secp256k1 init failed");
         return;
@@ -76,6 +76,11 @@ void app_main(void)
     if (provision) provision_run(); /* never returns */
 
     button_watch_long_press(CONFIG_SIGNER_LONG_PRESS_MS, signer_app_request_provision);
+    if (store_err != ESP_OK) {
+        halt_with_error("signer storage unreadable; not erased. Reflash the previous firmware, or enter "
+                        "provision mode and run `esp32signer wipe` (destroys the key)");
+        return;
+    }
 
     char msg[200];
     if (signer_app_load(msg, sizeof(msg)) != ESP_OK) {

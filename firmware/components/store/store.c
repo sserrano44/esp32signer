@@ -27,19 +27,15 @@ esp_err_t store_init(void)
         err = nvs_flash_generate_keys_v2(scheme, &cfg);
         if (err != ESP_OK) return err;
     }
+    /* Never erase on NO_FREE_PAGES / NEW_VERSION_FOUND (the usual NVS recipe):
+     * this partition holds the only copy of the signing key. The caller fails
+     * closed; erasing is an explicit `wipe` from provision mode. */
     err = nvs_flash_secure_init_partition(PARTITION, &cfg);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase_partition(PARTITION));
-        err = nvs_flash_secure_init_partition(PARTITION, &cfg);
-    }
     memset(&cfg, 0, sizeof(cfg));
 #else
     err = nvs_flash_init_partition(PARTITION);
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase_partition(PARTITION));
-        err = nvs_flash_init_partition(PARTITION);
-    }
 #endif
+    if (err != ESP_OK) ESP_LOGE(TAG, "signer_nvs init failed: %s (not erasing)", esp_err_to_name(err));
     return err;
 }
 
