@@ -201,8 +201,11 @@ def cmd_reboot(args) -> None:
 
 
 def cmd_gen_cert(args) -> None:
-    paths = certs.make_server_cert(args.hostname, Path(args.out_dir), Path(args.ca_dir) if args.ca_dir else None,
-                                   args.ip)
+    try:
+        paths = certs.make_server_cert(args.hostname, Path(args.out_dir), Path(args.ca_dir) if args.ca_dir else None,
+                                       args.ip)
+    except certs.CertError as e:
+        sys.exit(f"error: {e}")
     for k, p in paths.items():
         print(f"{k:5s} {p}")
     if "ca" in paths:

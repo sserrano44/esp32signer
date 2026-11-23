@@ -44,11 +44,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from decimal import Decimal
+from decimal import Decimal, Inexact, InvalidOperation, localcontext
 from typing import Any
 
 import yaml
 from eth_utils import keccak
+
+from . import device_regex
 
 GWEI = 10**9
 ETH = 10**18
@@ -71,8 +73,23 @@ CONTRACT_KEYS = {"address", "label", "max_value_eth", "max_value_wei", "rules", 
 RULE_KEYS = {"name", "calldata"}
 
 
+# Firmware limits (firmware/components/policy/include/policy.h): checked here
+# so compile-policy fails before provisioning, not on the device.
+MAX_CHAIN_IDS = 16
+MAX_NATIVE = 64
+MAX_CONTRACTS = 128
+MAX_RULES_PER_CONTRACT = 64
+MAX_TOTAL_INSTS = 16384
+U256 = 2**256
+
+
 class PolicyError(ValueError):
     pass
+
+
+def _is_int(v: Any) -> bool:
+    """A YAML integer. bool is an int subclass in Python but serializes as true/false."""
+    return isinstance(v, int) and not isinstance(v, bool)
 
 
 def _check_keys(obj: Any, allowed: set[str], where: str) -> None:
@@ -84,13 +101,29 @@ def _check_keys(obj: Any, allowed: set[str], where: str) -> None:
 
 
 def _to_wei(value: Any, unit: int, where: str) -> int:
+    """Exact decimal -> wei. Never rounds: a limit is either exactly representable or rejected."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise PolicyError(f"{where}: not a number: {value!r}")
+    if isinstance(value, float):
+        # Unquoted YAML decimals arrive as binary floats. repr() gives the shortest
+        # decimal that round-trips, which is what was written for up to 15 digits.
+        text = repr(value)
+        if len(Decimal(text).as_tuple().digits) > 15:
+            raise PolicyError(f"{where}: {value!r} has too many digits for an unquoted number; quote it")
+    else:
+        text = str(value).strip()
     try:
-        d = Decimal(str(value))
-    except Exception as e:  # noqa: BLE001
-        raise PolicyError(f"{where}: not a number: {value!r}") from e
-    wei = d * unit
-    if wei < 0 or wei != wei.to_integral_value():
+        d = Decimal(text)  # exact for any string
+        with localcontext() as ctx:
+            ctx.prec = 200
+            ctx.traps[Inexact] = True
+            wei = d * unit
+    except (InvalidOperation, Inexact, ValueError) as e:
+        raise PolicyError(f"{where}: not an exact number: {value!r}") from e
+    if not wei.is_finite() or wei < 0 or wei != wei.to_integral_value():
         raise PolicyError(f"{where}: must be a non-negative whole number of wei")
+    if wei >= U256:
+        raise PolicyError(f"{where}: does not fit in 256 bits")
     return int(wei)
 
 
@@ -114,6 +147,7 @@ def selector(signature: str) -> str:
 class _Ctx:
     def __init__(self, book: dict[str, str]):
         self.book = book
+        self.insts = 0  # total compiled regex size, as the device counts it
 
     def address(self, value: Any, where: str) -> str:
         if not isinstance(value, str):
@@ -164,23 +198,24 @@ class _Ctx:
         out = MACRO_RE.sub(sub, pattern)
         if not (out.startswith("^") and out.endswith("$") and not out.endswith("\\$")):
             raise PolicyError(f"{where}: calldata regex must be anchored: start with ^ and end with $")
-        # Sanity-compile with Python's engine (device compiles again, authoritatively).
+        # The device's grammar and size limits (device_regex mirrors regex.c), then
+        # Python's engine, which evaluate() uses.
         probe = out.replace("{{addr:self}}", "0" * 64).replace("{{self}}", "0" * 40)
+        try:
+            self.insts += device_regex.instructions(probe)
+        except device_regex.RegexError as e:
+            raise PolicyError(f"{where}: not supported by the device regex engine: {e}") from e
         try:
             re.compile(probe)
         except re.error as e:
             raise PolicyError(f"{where}: invalid regex: {e}") from e
-        for bad, why in (("(?=", "lookahead"), ("(?!", "lookahead"), ("(?<", "lookbehind/named group"),
-                         ("\\b", "word boundary"), ("*?", "lazy quantifier"), ("+?", "lazy quantifier")):
-            if bad in probe:
-                raise PolicyError(f"{where}: {why} is not supported by the device regex engine")
         return out
 
 
 def _limits(lim: Any, where: str, keys: set[str]) -> dict:
     _check_keys(lim, keys, where)
     max_gas = lim.get("max_gas")
-    if not isinstance(max_gas, int) or max_gas <= 0:
+    if not _is_int(max_gas) or max_gas <= 0 or max_gas >= 2**53:
         raise PolicyError(f"{where}.max_gas must be a positive integer")
     return {
         "max_gas": max_gas,
@@ -196,7 +231,7 @@ def _chains(entry: dict, chain_ids: list[int], where: str) -> list[int] | None:
     if "chains" not in entry:
         return None
     ch = entry["chains"]
-    if not isinstance(ch, list) or not ch or not all(isinstance(c, int) for c in ch):
+    if not isinstance(ch, list) or not ch or not all(_is_int(c) for c in ch):
         raise PolicyError(f"{where}.chains must be a non-empty list of chain ids")
     if len(set(ch)) != len(ch):
         raise PolicyError(f"{where}.chains contains duplicates")
@@ -231,15 +266,17 @@ def compile_policy(src: str | dict) -> tuple[dict, list[str]]:
     ctx = _Ctx(book)
 
     chain_ids = doc.get("chain_ids")
-    if not isinstance(chain_ids, list) or not chain_ids or not all(isinstance(c, int) and c > 0 for c in chain_ids):
+    if not isinstance(chain_ids, list) or not chain_ids or not all(_is_int(c) and 0 < c <= 2**53 for c in chain_ids):
         raise PolicyError("chain_ids must be a non-empty list of positive integers")
+    if len(chain_ids) > MAX_CHAIN_IDS:
+        raise PolicyError(f"chain_ids: at most {MAX_CHAIN_IDS} (device limit)")
     if len(set(chain_ids)) != len(chain_ids):
         raise PolicyError("chain_ids contains duplicates")
 
     lim = doc.get("limits")
     limits = _limits(lim, "limits", LIMIT_KEYS)
     rate = lim.get("rate_per_minute", 0)
-    if not isinstance(rate, int) or rate < 0 or rate > 100000:
+    if not _is_int(rate) or rate < 0 or rate > 100000:
         raise PolicyError("limits.rate_per_minute must be an integer 0..100000")
     if rate == 0:
         warnings.append("limits.rate_per_minute is 0 (unlimited)")
@@ -251,7 +288,7 @@ def compile_policy(src: str | dict) -> tuple[dict, list[str]]:
     if not isinstance(cl, dict):
         raise PolicyError("chain_limits must be a mapping of chain id -> limits")
     for cid, l in sorted(cl.items()):
-        if not isinstance(cid, int) or cid not in chain_ids:
+        if not _is_int(cid) or cid not in chain_ids:
             raise PolicyError(f"chain_limits: {cid!r} is not in chain_ids")
         chain_limits.append({"chain_id": cid, **_limits(l, f"chain_limits.{cid}", CHAIN_LIMIT_KEYS)})
 
@@ -285,6 +322,8 @@ def compile_policy(src: str | dict) -> tuple[dict, list[str]]:
         rules_in = c.get("rules")
         if not isinstance(rules_in, list) or not rules_in:
             raise PolicyError(f"{where}: rules must be a non-empty list")
+        if len(rules_in) > MAX_RULES_PER_CONTRACT:
+            raise PolicyError(f"{where}: at most {MAX_RULES_PER_CONTRACT} rules per contract (device limit)")
         rules = []
         for j, r in enumerate(rules_in):
             rwhere = f"{where}.rules[{j}]"
@@ -309,6 +348,12 @@ def compile_policy(src: str | dict) -> tuple[dict, list[str]]:
 
     if not natives and not contracts:
         raise PolicyError("policy allows nothing: add native_transfers or contracts")
+    if len(natives) > MAX_NATIVE:
+        raise PolicyError(f"native_transfers: at most {MAX_NATIVE} entries (device limit)")
+    if len(contracts) > MAX_CONTRACTS:
+        raise PolicyError(f"contracts: at most {MAX_CONTRACTS} entries (device limit)")
+    if ctx.insts > MAX_TOTAL_INSTS:
+        raise PolicyError(f"policy regexes too large ({ctx.insts} instructions, device max {MAX_TOTAL_INSTS})")
 
     out: dict[str, Any] = {"version": 1, "chain_ids": chain_ids, "limits": limits}
     if chain_limits:
@@ -322,12 +367,102 @@ def compile_policy(src: str | dict) -> tuple[dict, list[str]]:
     return out, warnings
 
 
-def _qty(v: Any) -> int:
+class _Deny(Exception):
+    pass
+
+
+_HEX_QTY = re.compile(r"0[xX][0-9a-fA-F]{1,64}")
+_HEX_DATA = re.compile(r"0[xX](?:[0-9a-fA-F]{2})*")
+_FORBIDDEN_TX = ("authorizationList", "blobVersionedHashes", "maxFeePerBlobGas", "blobs")
+
+
+def _qty(tx: dict, key: str) -> int | None:
+    """Like the firmware's get_qty: None if absent/null; hex string or a JSON-safe integer."""
+    v = tx.get(key)
     if v is None:
-        return 0
-    if isinstance(v, int):
+        return None
+    if _is_int(v) and 0 <= v < U256:  # Python ints (callers convert JSON first)
         return v
-    return int(v, 16) if isinstance(v, str) and v.lower().startswith("0x") else int(v)
+    if isinstance(v, str) and _HEX_QTY.fullmatch(v):
+        return int(v, 16)
+    raise _Deny(f"invalid {key}")
+
+
+def _addr(v: Any, key: str) -> str | None:
+    if v is None:
+        return None
+    if not isinstance(v, str) or not ADDR_RE.match(v):
+        raise _Deny(f"invalid '{key}' address")
+    return v.lower()
+
+
+def normalize_tx(tx: dict, self_address: str | None = None) -> dict:
+    """Parse a JSON-RPC transaction the way the device does (tx_json.c + rpc.c).
+
+    Returns {type, chain, gas, max_fee, max_prio, to, value, data}; raises _Deny.
+    """
+    if not isinstance(tx, dict):
+        raise _Deny("transaction must be an object")
+    for k in _FORBIDDEN_TX:
+        if k in tx:
+            raise _Deny(f"field '{k}' is not supported")
+    mf, mp, gp = _qty(tx, "maxFeePerGas"), _qty(tx, "maxPriorityFeePerGas"), _qty(tx, "gasPrice")
+    t = _qty(tx, "type")
+    if t is not None:
+        if t not in (0, 2):
+            raise _Deny("unsupported transaction type (only 0x0 and 0x2 are allowed)")
+    elif mf is not None or mp is not None:
+        t = 2
+    elif gp is not None:
+        t = 0
+    else:
+        raise _Deny("missing fee fields (maxFeePerGas/maxPriorityFeePerGas or gasPrice)")
+    if t == 2:
+        if mf is None or mp is None:
+            raise _Deny("type 0x2 requires maxFeePerGas and maxPriorityFeePerGas")
+        if gp is not None:
+            raise _Deny("gasPrice not allowed with type 0x2")
+        if mp > mf:
+            raise _Deny("maxPriorityFeePerGas exceeds maxFeePerGas")
+    else:
+        if gp is None:
+            raise _Deny("type 0x0 requires gasPrice")
+        if mf is not None or mp is not None:
+            raise _Deny("EIP-1559 fee fields not allowed with type 0x0")
+        mf = gp
+    chain = _qty(tx, "chainId")
+    if not chain or chain > 2**53:
+        raise _Deny("chainId is required")
+    if _qty(tx, "nonce") is None:
+        raise _Deny("nonce is required")
+    gas, gas_limit = _qty(tx, "gas"), _qty(tx, "gasLimit")
+    if gas is not None and gas_limit is not None and gas != gas_limit:
+        raise _Deny("'gas' and 'gasLimit' differ")
+    gas = gas if gas is not None else gas_limit
+    if gas is None:
+        raise _Deny("gas is required")
+    value = _qty(tx, "value") or 0
+    to = _addr(tx.get("to"), "to")
+    frm = _addr(tx.get("from"), "from")
+    if frm is not None and self_address and frm != self_address.lower():
+        raise _Deny("'from' is not the signer address")
+    data_in, data_d = tx.get("input"), tx.get("data")
+    if data_in is not None:
+        if data_d is not None and (not isinstance(data_d, str) or data_d.lower() != str(data_in).lower()):
+            raise _Deny("'data' and 'input' differ")
+        data = data_in
+    else:
+        data = data_d if data_d is not None else "0x"
+    if not isinstance(data, str) or not _HEX_DATA.fullmatch(data):
+        raise _Deny("invalid 'input'/'data'")
+    al = tx.get("accessList")
+    if al is not None:
+        if not isinstance(al, list):
+            raise _Deny("invalid accessList")
+        if t == 0 and al:
+            raise _Deny("accessList not allowed with type 0x0")
+    return {"type": t, "chain": chain, "gas": gas, "max_fee": mf, "max_prio": mp, "to": to, "value": value,
+            "data": data[2:].lower()}
 
 
 def evaluate(policy: dict, tx: dict, self_address: str | None = None) -> tuple[bool, str]:
@@ -340,10 +475,11 @@ def evaluate(policy: dict, tx: dict, self_address: str | None = None) -> tuple[b
     def addr(a: str) -> str:
         return "0x" + selfhex if a == "{{self}}" else a.lower()
 
-    ttype = _qty(tx.get("type")) if tx.get("type") is not None else (2 if "maxFeePerGas" in tx else 0)
-    if ttype not in (0, 2):
-        return False, f"transaction type 0x{ttype:x} not allowed"
-    chain = _qty(tx.get("chainId"))
+    try:
+        t = normalize_tx(tx, self_address)
+    except _Deny as e:
+        return False, f"parse: {e}"
+    chain = t["chain"]
     if chain not in policy["chain_ids"]:
         return False, f"chainId {chain} not allowed"
     lim = next((cl for cl in policy.get("chain_limits", []) if cl["chain_id"] == chain), policy["limits"])
@@ -351,19 +487,16 @@ def evaluate(policy: dict, tx: dict, self_address: str | None = None) -> tuple[b
     def on_chain(entry: dict) -> bool:
         return chain in entry.get("chain_ids", [chain])
 
-    if _qty(tx.get("gas", tx.get("gasLimit"))) > lim["max_gas"]:
+    if t["gas"] > lim["max_gas"]:
         return False, "gas exceeds max_gas"
-    fee = _qty(tx.get("maxFeePerGas") if ttype == 2 else tx.get("gasPrice"))
-    if fee > int(lim["max_fee_per_gas"]):
+    if t["max_fee"] > int(lim["max_fee_per_gas"]):
         return False, "fee per gas exceeds cap"
-    if ttype == 2 and _qty(tx.get("maxPriorityFeePerGas")) > int(lim["max_priority_fee_per_gas"]):
+    if t["type"] == 2 and t["max_prio"] > int(lim["max_priority_fee_per_gas"]):
         return False, "priority fee exceeds cap"
-    to = tx.get("to")
+    to = t["to"]
     if not to:
         return False, "contract creation not allowed"
-    to = to.lower()
-    data = (tx.get("input") or tx.get("data") or "0x").lower()[2:]
-    value = _qty(tx.get("value"))
+    data, value = t["data"], t["value"]
     if not data:
         for n in policy.get("native_transfers", []):
             if on_chain(n) and addr(n["to"]) == to:
@@ -382,6 +515,12 @@ def evaluate(policy: dict, tx: dict, self_address: str | None = None) -> tuple[b
                 return True, f"{label}:{r.get('name', 'rule')}"
         return False, f"calldata (selector 0x{data[:8]}) matched no rule for contract {label}"
     return False, f"destination {to} not whitelisted"
+
+
+def policy_instructions(policy: dict) -> int:
+    """Total compiled regex size of a compiled policy, as the device counts it."""
+    return sum(device_regex.instructions(r["calldata"].replace("{{addr:self}}", "0" * 64).replace("{{self}}", "0" * 40))
+               for c in policy.get("contracts", []) for r in c["rules"])
 
 
 def canonical_json(policy: dict) -> bytes:

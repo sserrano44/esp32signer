@@ -131,7 +131,7 @@ def test_self_macro():
     ("calldata: '^095ea7b3.*'", "anchored"),
     ("calldata: '^{{addr:nobody}}$'", "unknown address_book"),
     ("calldata: '^{{bogus}}$'", "unknown macro"),
-    ("calldata: '^(ab$'", "invalid regex"),
+    ("calldata: '^(ab$'", r"device regex engine: missing \)"),
     ("calldata: '^(?=a)b$'", "not supported"),
     ("calldata: '^a*?$'", "not supported"),
     ("calldata: '^a$'\n        extra: 1", "unknown key"),

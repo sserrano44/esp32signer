@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import itertools
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -56,7 +57,13 @@ def to_rpc_tx(tx: dict[str, Any]) -> dict[str, Any]:
 
 
 class SignerClient:
-    def __init__(self, url: str, token: str, ca: str | bool | None = None, timeout: float = 10.0):
+    def __init__(self, url: str, token: str, ca: str | bool | None = None, timeout: float = 10.0,
+                 allow_insecure: bool = False):
+        u = urlparse(url)
+        if u.username or u.password:
+            raise ValueError("signer URL must not embed credentials")
+        if not u.hostname or (u.scheme != "https" and not (allow_insecure and u.scheme == "http")):
+            raise ValueError(f"signer URL must be https://host (got {url!r}); the bearer token would travel in clear")
         self.url = url.rstrip("/") + "/"
         self.timeout = timeout
         self._ids = itertools.count(1)

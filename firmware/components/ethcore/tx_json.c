@@ -151,8 +151,15 @@ int eth_tx_from_json(const cJSON *obj, eth_tx_t *tx, char *err, size_t errlen)
     if (rc != 1 || tx->chain_id == 0 || tx->chain_id > MAX_CHAIN_ID)
         return fail(err, errlen, "chainId is required (device has no node access)");
     if (get_u64(obj, "nonce", &tx->nonce) != 1) return fail(err, errlen, "nonce is required (device has no node access)");
+    uint64_t gas_limit;
     rc = get_u64(obj, "gas", &tx->gas);
-    if (rc == 0) rc = get_u64(obj, "gasLimit", &tx->gas);
+    int rcl = get_u64(obj, "gasLimit", &gas_limit);
+    if (rc < 0 || rcl < 0) return fail(err, errlen, "invalid gas");
+    if (rc == 1 && rcl == 1 && gas_limit != tx->gas) return fail(err, errlen, "'gas' and 'gasLimit' differ");
+    if (rc == 0) {
+        rc = rcl;
+        tx->gas = gas_limit;
+    }
     if (rc != 1) return fail(err, errlen, "gas is required (device has no node access)");
 
     if (get_qty(obj, "value", tx->value) < 0) return fail(err, errlen, "invalid value");

@@ -181,6 +181,8 @@ static void test_parse_errors(void)
     snprintf(buf, sizeof(buf), "{%s,\"maxFeePerGas\":\"0x1\",\"maxPriorityFeePerGas\":\"0x1\",\"accessList\":"
              "[{\"address\":\"0x1111111111111111111111111111111111111111\",\"storageKeys\":[],\"storageKeys\":[]}]}", base);
     expect_parse_error(buf, "duplicate field 'storageKeys'");
+    snprintf(buf, sizeof(buf), "{%s,\"gasPrice\":\"0x1\",\"gasLimit\":\"0x5209\"}", base);
+    expect_parse_error(buf, "'gas' and 'gasLimit' differ");
 }
 
 int main(int argc, char **argv)

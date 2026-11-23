@@ -27,6 +27,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "policy_load: %s\n", err);
         return 2;
     }
+    fprintf(stderr, "regex_instructions %u\n", (unsigned)policy_total_insts(p));
     cJSON *arr = cJSON_Parse(tjson), *t;
     eth_tx_t *tx = malloc(sizeof(eth_tx_t));
     uint64_t now = 0;
