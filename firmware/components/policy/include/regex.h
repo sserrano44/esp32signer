@@ -24,8 +24,17 @@ extern "C" {
 typedef struct regex_prog regex_prog_t;
 
 int regex_compile(const char *pattern, regex_prog_t **out, char *err, size_t errlen);
-/* 1 = match, 0 = no match, -1 = step budget exceeded / OOM (treat as deny). */
+#define REGEX_BUDGET (-1) /* step budget exceeded */
+#define REGEX_NOMEM (-2)  /* scratch allocation failed */
+
+/* 1 = match, 0 = no match, REGEX_BUDGET / REGEX_NOMEM (treat both as deny).
+ * Allocates its scratch memory on every call. */
 int regex_full_match(const regex_prog_t *p, const char *s, size_t len);
+/* Bytes of scratch regex_full_match_ws needs for a program of n_insts. */
+size_t regex_ws_size(size_t n_insts);
+/* Same as regex_full_match, using caller-provided scratch of at least
+ * regex_ws_size(regex_prog_insts(p)) bytes, so matching never allocates. */
+int regex_full_match_ws(const regex_prog_t *p, const char *s, size_t len, void *ws);
 size_t regex_prog_insts(const regex_prog_t *p);
 void regex_free(regex_prog_t *p);
 

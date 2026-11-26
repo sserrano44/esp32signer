@@ -32,7 +32,8 @@ int policy_load(const char *json, size_t len, const uint8_t *self_addr, policy_t
 void policy_free(policy_t *p);
 
 /* Default-deny evaluation. `now_ms` drives the rate limiter, which only
- * consumes a token when every other check has passed. */
+ * consumes a token when every other check has passed. Not reentrant: it uses
+ * scratch memory owned by `p`, so callers serialize (signer mode holds a mutex). */
 void policy_check(policy_t *p, const eth_tx_t *tx, uint64_t now_ms, policy_result_t *res);
 
 size_t policy_total_insts(const policy_t *p);

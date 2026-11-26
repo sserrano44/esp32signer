@@ -10,6 +10,18 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 # ---- Console over native USB (Serial/JTAG) --------------------------------
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
+# ---- PSRAM ----------------------------------------------------------------
+# ESP32-S3FH4R2: 2 MB in-package quad PSRAM. malloc() above the threshold goes
+# to PSRAM (TLS buffers, tx structs, policy scratch); smaller ones and task
+# stacks, where the private key lives while signing, stay in internal RAM.
+# Boards without PSRAM still boot (IGNORE_NOTFOUND) and use internal RAM only.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=49152
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
 # ---- Tasks ----------------------------------------------------------------
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 

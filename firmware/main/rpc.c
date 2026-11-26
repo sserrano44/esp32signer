@@ -59,6 +59,11 @@ static char *m_status(const cJSON *id)
     cJSON_AddNumberToObject(r, "rejected", g_app.n_rejected);
     cJSON_AddNumberToObject(r, "auth_failures", g_app.n_auth_fail);
     cJSON_AddNumberToObject(r, "free_heap", (double)esp_get_free_heap_size());
+    cJSON_AddNumberToObject(r, "free_internal", (double)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(r, "min_free_internal", (double)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(r, "largest_internal_block",
+                            (double)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    cJSON_AddNumberToObject(r, "free_psram", (double)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     return respond(id, r, 0, NULL);
 }
 

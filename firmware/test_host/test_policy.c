@@ -424,11 +424,47 @@ static void test_policy_load(void)
              "unknown key 'rate_per_minute'", 1);
 }
 
+/* Matching uses scratch reserved at load: the largest calldata and a long rule
+ * must evaluate without allocating (ASan checks the bounds). */
+static void test_policy_scratch(void)
+{
+    uint8_t self[20];
+    addr_from_hex(SELF, self);
+    policy_t *p;
+    char err[160];
+    int rc = policy_load(POLICY_JSON, strlen(POLICY_JSON), self, &p, err, sizeof(err));
+    CHECK(rc == 0, "load: %s", err);
+    if (rc) return;
+    size_t words = (ETH_TX_MAX_DATA - 4) / 32;
+    char *hex = malloc(8 + words * 64 + 1);
+    memcpy(hex, "3593564c", 8);
+    memset(hex + 8, 'a', words * 64);
+    hex[8 + words * 64] = 0;
+    expect(p, mktx(ROUTER, hex, "0"), 1000, 1, "router:any-execute");
+    hex[8 + words * 64 - 2] = 0; /* one byte short: not whole words */
+    expect(p, mktx(ROUTER, hex, "0"), 2000, 0, "matched no rule");
+    free(hex);
+    policy_free(p);
+
+    regex_prog_t *re;
+    rc = regex_compile("^(?:ab|cd)*[0-9a-f]{64}$", &re, err, sizeof(err));
+    CHECK(rc == 0, "compile: %s", err);
+    if (rc) return;
+    void *ws = malloc(regex_ws_size(regex_prog_insts(re)));
+    const char *ok = "abcdab0000000000000000000000000000000000000000000000000000000000000000";
+    CHECK(regex_full_match_ws(re, ok, strlen(ok), ws) == 1, "ws match");
+    CHECK(regex_full_match_ws(re, "abx", 3, ws) == 0, "ws no match");
+    CHECK(regex_full_match(re, ok, strlen(ok)) == 1, "malloc path match");
+    free(ws);
+    regex_free(re);
+}
+
 int main(void)
 {
     test_regex();
     test_policy_eval();
     test_policy_multichain();
     test_policy_load();
+    test_policy_scratch();
     DONE();
 }

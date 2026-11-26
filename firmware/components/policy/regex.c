@@ -598,13 +598,27 @@ static void addthread(vm_t *vm, tlist_t *l, uint16_t pc0, size_t pos)
     }
 }
 
+size_t regex_ws_size(size_t n)
+{
+    /* mark[n] (uint32), two thread lists of n (uint16), and the addthread
+     * stack: each pc is pushed at most once per generation but SPLIT pushes
+     * two entries before marking, so 2n+2 bounds it. */
+    return n * sizeof(uint32_t) + 2 * n * sizeof(uint16_t) + (2 * n + 2) * sizeof(uint16_t);
+}
+
 int regex_full_match(const regex_prog_t *p, const char *s, size_t len)
 {
+    void *ws = malloc(regex_ws_size((size_t)p->n));
+    if (!ws) return REGEX_NOMEM;
+    int r = regex_full_match_ws(p, s, len, ws);
+    free(ws);
+    return r;
+}
+
+int regex_full_match_ws(const regex_prog_t *p, const char *s, size_t len, void *ws)
+{
     size_t n = (size_t)p->n;
-    /* Each pc is pushed at most once per generation but SPLIT pushes two
-     * entries before marking; 2n+1 bounds the stack. */
-    uint8_t *mem = malloc(n * sizeof(uint32_t) + 2 * n * sizeof(uint16_t) + (2 * n + 2) * sizeof(uint16_t));
-    if (!mem) return -1;
+    uint8_t *mem = ws;
     vm_t vm = {
         .p = p,
         .mark = (uint32_t *)mem,
@@ -628,7 +642,7 @@ int regex_full_match(const regex_prog_t *p, const char *s, size_t len)
         uint8_t ch = (uint8_t)s[pos];
         for (int i = 0; i < cl->n; i++) {
             if (++steps > REGEX_STEP_BUDGET) {
-                result = -1;
+                result = REGEX_BUDGET;
                 goto done;
             }
             const inst_t *in = &p->insts[cl->pcs[i]];
@@ -651,7 +665,6 @@ int regex_full_match(const regex_prog_t *p, const char *s, size_t len)
             break;
         }
 done:
-    free(mem);
     return result;
 }
 

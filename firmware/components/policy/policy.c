@@ -53,6 +53,10 @@ struct policy {
     size_t n_contracts;
     contract_t *contracts;
     size_t total_insts;
+    /* Matching scratch, allocated once at load so signing never needs a large
+     * allocation: regex VM state for the biggest rule, and the hex calldata. */
+    void *ws;
+    char *hexdata;
 };
 
 static int fail(char *err, size_t errlen, const char *fmt, ...)
@@ -412,6 +416,18 @@ int policy_load(const char *json, size_t len, const uint8_t *self_addr, policy_t
         policy_free(p);
         return -1;
     }
+    size_t max_insts = 1;
+    for (size_t i = 0; i < p->n_contracts; i++)
+        for (size_t r = 0; r < p->contracts[i].n_rules; r++) {
+            size_t n = regex_prog_insts(p->contracts[i].rules[r].re);
+            if (n > max_insts) max_insts = n;
+        }
+    p->ws = malloc(regex_ws_size(max_insts));
+    p->hexdata = malloc(ETH_TX_MAX_DATA * 2 + 1);
+    if (!p->ws || !p->hexdata) {
+        policy_free(p);
+        return fail(err, errlen, "out of memory for matching scratch");
+    }
     *out = p;
     return 0;
 }
@@ -425,6 +441,8 @@ void policy_free(policy_t *p)
     }
     free(p->contracts);
     free(p->natives);
+    free(p->ws);
+    free(p->hexdata);
     free(p);
 }
 
@@ -515,14 +533,13 @@ static int check(policy_t *p, const eth_tx_t *tx, uint64_t now_ms, policy_result
             u256_to_dec(tx->value, a);
             return deny(res, "value %s exceeds max_value for contract %s", a, label);
         }
-        char *hexdata = malloc(tx->data_len * 2 + 1);
-        if (!hexdata) return deny(res, "out of memory");
+        if (tx->data_len > ETH_TX_MAX_DATA) return deny(res, "calldata too long");
+        char *hexdata = p->hexdata;
         hex_encode(tx->data, tx->data_len, hexdata);
         int budget_hit = 0;
         for (size_t r = 0; r < ct->n_rules; r++) {
-            int m = regex_full_match(ct->rules[r].re, hexdata, tx->data_len * 2);
+            int m = regex_full_match_ws(ct->rules[r].re, hexdata, tx->data_len * 2, p->ws);
             if (m == 1) {
-                free(hexdata);
                 if (!rate_take(p, now_ms)) return deny(res, "rate limit exceeded");
                 res->allowed = 1;
                 snprintf(res->reason, sizeof(res->reason), "%s:%s", label,
@@ -533,7 +550,6 @@ static int check(policy_t *p, const eth_tx_t *tx, uint64_t now_ms, policy_result
         }
         char sel[9] = "none";
         if (tx->data_len >= 4) hex_encode(tx->data, 4, sel);
-        free(hexdata);
         return deny(res, "calldata (selector 0x%s) matched no rule for contract %s%s", sel, label,
                     budget_hit ? " (regex step budget exceeded)" : "");
     }
