@@ -1,0 +1,21 @@
+# systemd user unit for the arb bot. Assumes the repo is cloned to ~/esp32signer
+# and the venv is at ~/esp32signer/host/.venv (%h = the user's home directory).
+#
+#   cp deploy/wars-arb.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now wars-arb
+#   loginctl enable-linger $USER     # keep it running when you are logged out
+[Unit]
+Description=wARS/USDC Base<->Celo arb bot (signs on the ESP32 signer)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/esp32signer/examples/wars-arb
+ExecStart=%h/esp32signer/host/.venv/bin/python -m wars_arb.main run --live
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=30
+StandardOutput=append:%h/esp32signer/examples/wars-arb/bot.log
+StandardError=append:%h/esp32signer/examples/wars-arb/bot.log
+
+[Install]
+WantedBy=default.target

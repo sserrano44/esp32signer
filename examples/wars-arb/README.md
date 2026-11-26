@@ -109,6 +109,39 @@ python -m wars_arb.main run --live                    # trade for real
 By default the bot runs dry. In dry-run mode every transaction is still built and
 signed by the device, so the device log shows it accepted them, but nothing is broadcast.
 
+## Running on a server
+
+To keep the bot running on an always-on Linux machine with systemd:
+
+1. **Check the server can reach the signer.** It must be on the same LAN and resolve
+   the signer's hostname: `getent hosts signer.local`.
+2. **Clone the repo and install** (any Python ≥ 3.10; `uv venv` also works):
+   ```sh
+   git clone https://github.com/sserrano44/esp32signer.git ~/esp32signer
+   cd ~/esp32signer && python3 -m venv host/.venv && host/.venv/bin/pip install -e "host[bot]"
+   ```
+3. **Copy the files that are not in git**, keeping the same paths:
+   - `examples/wars-arb/config.yaml`
+   - `certs/ca/ca.pem` (the CA certificate only; the CA private key stays on the provisioning machine)
+   - `certs/api_token`
+   - `examples/wars-arb/state.json`, if the bot ran somewhere else before. It holds
+     in-flight transfers and any halt.
+
+   Make the token, config and state readable only by you: `chmod 600`.
+4. **Install the service**, a systemd user unit:
+   ```sh
+   cp examples/wars-arb/deploy/wars-arb.service ~/.config/systemd/user/
+   systemctl --user daemon-reload && systemctl --user enable --now wars-arb
+   loginctl enable-linger $USER     # keep running after you log out
+   ```
+   It logs to `examples/wars-arb/bot.log` and restarts if it crashes. A halt is
+   not a crash: a halted bot keeps running and waits for `resume`.
+
+**Run only one copy of the bot.** Two copies would fight over nonces and each
+keep its own `state.json`. Stop the old copy before starting a new one.
+
+To update: `git pull`, then `systemctl --user restart wars-arb`.
+
 ## What the policy still allows
 
 A compromised bot is limited to the following:
